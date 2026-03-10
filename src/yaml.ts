@@ -33,22 +33,93 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
       token: {
         // Single colon is not a YAML token, so remove.
         '#CL': null,
-
-        // Element prefix and separator.
-        '#EL': '-',
       }
     },
 
     // Colons can still end unquoted text (TX, lexer.textMatcher).
     ender: ':',
 
-    // Disable implicit lists from space/comma separation at top level.
-    value: {
-      map: { extend: true },
+    // Custom text check: consume to end of line (including spaces)
+    // for YAML plain scalar values.
+    text: {
+      check: (lex: any) => {
+        let pnt = lex.pnt
+        let fwd = lex.src.substring(pnt.sI)
+
+        // Don't apply inside flow context (brackets/braces).
+        // Use a simple heuristic: check if we're inside [] or {}.
+        // For now, only apply when fwd doesn't start with special chars.
+        let ch = fwd[0]
+        if (ch === '{' || ch === '}' || ch === '[' || ch === ']' ||
+            ch === ',' || ch === ':' || ch === '#' || ch === '\n' ||
+            ch === '\r' || ch === '"' || ch === "'" || ch === undefined) {
+          return null
+        }
+
+        // Match text to end of line, stopping at `: `, `:\n`, ` #`, or newline.
+        // This handles YAML plain scalars.
+        let text = ''
+        let i = 0
+        while (i < fwd.length) {
+          let c = fwd[i]
+          // Stop at newline.
+          if (c === '\n' || c === '\r') break
+          // Stop at colon followed by space or newline (key-value separator).
+          if (c === ':' && (fwd[i + 1] === ' ' || fwd[i + 1] === '\n' ||
+              fwd[i + 1] === '\r' || fwd[i + 1] === undefined)) break
+          // Stop at space-hash (comment).
+          if (c === ' ' && fwd[i + 1] === '#') break
+          // Stop at flow close indicators.
+          if (c === ']' || c === '}') break
+          text += c
+          i++
+        }
+
+        // Trim trailing whitespace.
+        text = text.replace(/\s+$/, '')
+
+        if (text.length === 0) return null
+
+        // Check if this is a known YAML value.
+        let valMap: Record<string, any> = {
+          'true': true, 'True': true, 'TRUE': true,
+          'false': false, 'False': false, 'FALSE': false,
+          'null': null, 'Null': null, 'NULL': null,
+          '~': null,
+          'yes': true, 'Yes': true, 'YES': true,
+          'no': false, 'No': false, 'NO': false,
+          'on': true, 'On': true, 'ON': true,
+          'off': false, 'Off': false, 'OFF': false,
+          '.inf': Infinity, '.Inf': Infinity, '.INF': Infinity,
+          '-.inf': -Infinity, '-.Inf': -Infinity, '-.INF': -Infinity,
+          '.nan': NaN, '.NaN': NaN, '.NAN': NaN,
+        }
+        if (text in valMap) {
+          let tkn = lex.token('#VL', valMap[text], text, pnt)
+          pnt.sI += text.length
+          pnt.cI += text.length
+          return { done: true, token: tkn }
+        }
+
+        // Check if it's a number.
+        let num = +text
+        if (!isNaN(num) && text !== '') {
+          let tkn = lex.token('#NR', num, text, pnt)
+          pnt.sI += text.length
+          pnt.cI += text.length
+          return { done: true, token: tkn }
+        }
+
+        // Plain text — consume to end of meaningful content.
+        let tkn = lex.token('#TX', text, text, pnt)
+        pnt.sI += text.length
+        pnt.cI += text.length
+        return { done: true, token: tkn }
+      },
     },
   })
 
-  // Get the Tin (Token id number) for #EL.
+  // Register #EL token (not as a fixed token — we match it in yamlMatcher).
   let EL = jsonic.token('#EL')
 
   // All tokens that can start a value.
@@ -65,13 +136,29 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               let pnt = lex.pnt
               let fwd = lex.src.substring(pnt.sI)
 
-              // Yaml colons are ': ' and ':<newline>'.
-              let colon = fwd.match(/^:( |\r?\n)/)
-              if (colon) {
-                let tkn = lex.token('#CL', 1, colon[0], lex.pnt)
+              // YAML element marker: "- " (dash followed by space).
+              // Only match at line start or after indent (cI <= position of -).
+              if (fwd[0] === '-' && fwd[1] === ' ') {
+                let tkn = lex.token('#EL', undefined, '- ', lex.pnt)
+                // Consume the dash only; the space will be ignored.
+                pnt.sI += 2
+                pnt.cI += 2
+                return tkn
+              }
+
+              // Yaml colons are ': ', ':<newline>', or ':' at end of input.
+              if (fwd[0] === ':' && (fwd[1] === ' ' || fwd[1] === '\n' ||
+                  fwd[1] === '\r' || fwd[1] === undefined)) {
+                let tkn = lex.token('#CL', 1, ': ', lex.pnt)
                 pnt.sI += 1
-                pnt.rI += ' ' != colon[1] ? 1 : 0
-                pnt.cI += ' ' == colon[1] ? 2 : 0
+                if (fwd[1] === ' ') {
+                  pnt.cI += 2
+                } else if (fwd[1] === '\n' || fwd[1] === '\r') {
+                  // Don't consume newline — leave for #IN.
+                } else {
+                  // End of input after colon.
+                  pnt.cI += 1
+                }
                 return tkn
               }
 
