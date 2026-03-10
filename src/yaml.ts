@@ -46,10 +46,119 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         let pnt = lex.pnt
         let fwd = lex.src.substring(pnt.sI)
 
-        // Don't apply inside flow context (brackets/braces).
-        // Use a simple heuristic: check if we're inside [] or {}.
-        // For now, only apply when fwd doesn't start with special chars.
         let ch = fwd[0]
+
+        // Block scalar: | or > (with optional chomping indicator)
+        if (ch === '|' || ch === '>') {
+          let fold = ch === '>'
+          let chomp = 'clip' // default: single trailing newline
+          let idx = 1
+          if (fwd[idx] === '+') { chomp = 'keep'; idx++ }
+          else if (fwd[idx] === '-') { chomp = 'strip'; idx++ }
+
+          // Must be followed by newline (possibly with trailing spaces/comment)
+          while (fwd[idx] === ' ') idx++
+          if (fwd[idx] === '#') {
+            while (idx < fwd.length && fwd[idx] !== '\n' && fwd[idx] !== '\r') idx++
+          }
+          if (fwd[idx] !== '\n' && fwd[idx] !== '\r' && fwd[idx] !== undefined) {
+            // Not a block scalar — fall through to normal text handling.
+          } else {
+            // Skip the indicator line.
+            if (fwd[idx] === '\r') idx++
+            if (fwd[idx] === '\n') idx++
+
+            // Determine block indent from first content line.
+            let blockIndent = 0
+            let tempIdx = idx
+            while (fwd[tempIdx] === ' ') { blockIndent++; tempIdx++ }
+
+            if (blockIndent === 0) {
+              // Empty block scalar.
+              let val = chomp === 'strip' ? '' : chomp === 'keep' ? '\n' : ''
+              let src = fwd.substring(0, idx)
+              let tkn = lex.token('#TX', val, src, pnt)
+              pnt.sI += idx
+              pnt.rI += 1
+              pnt.cI = 0
+              return { done: true, token: tkn }
+            }
+
+            // Collect indented lines.
+            let lines: string[] = []
+            let pos = idx
+            let rows = 1 // Already consumed one newline
+            while (pos < fwd.length) {
+              // Check indent of current line.
+              let lineIndent = 0
+              while (pos + lineIndent < fwd.length && fwd[pos + lineIndent] === ' ') lineIndent++
+
+              // Blank line (only whitespace before newline or end).
+              let afterSpaces = pos + lineIndent
+              if (afterSpaces >= fwd.length || fwd[afterSpaces] === '\n' || fwd[afterSpaces] === '\r') {
+                lines.push('')
+                pos = afterSpaces
+                if (fwd[pos] === '\r') pos++
+                if (fwd[pos] === '\n') pos++
+                rows++
+                continue
+              }
+
+              // Less indent means end of block.
+              if (lineIndent < blockIndent) break
+
+              // Consume the line content (strip block indent).
+              let lineStart = pos + blockIndent
+              let lineEnd = lineStart
+              while (lineEnd < fwd.length && fwd[lineEnd] !== '\n' && fwd[lineEnd] !== '\r') lineEnd++
+              lines.push(fwd.substring(lineStart, lineEnd))
+              pos = lineEnd
+              if (fwd[pos] === '\r') pos++
+              if (fwd[pos] === '\n') pos++
+              rows++
+            }
+
+            // Build the scalar value.
+            let val: string
+            if (fold) {
+              // Folded: replace single newlines with spaces, preserve double newlines.
+              let parts: string[] = []
+              let current = ''
+              for (let li = 0; li < lines.length; li++) {
+                if (lines[li] === '') {
+                  if (current) { parts.push(current); current = '' }
+                  parts.push('')
+                } else {
+                  current = current ? current + ' ' + lines[li] : lines[li]
+                }
+              }
+              if (current) parts.push(current)
+              val = parts.join('\n')
+            } else {
+              // Literal: preserve newlines.
+              val = lines.join('\n')
+            }
+
+            // Apply chomping.
+            if (chomp === 'strip') {
+              val = val.replace(/\n+$/, '')
+            } else if (chomp === 'clip') {
+              val = val.replace(/\n+$/, '') + '\n'
+            } else {
+              // keep: preserve all trailing newlines
+              val = val + '\n'
+            }
+
+            let src = fwd.substring(0, pos)
+            let tkn = lex.token('#TX', val, src, pnt)
+            pnt.sI += pos
+            pnt.rI += rows
+            pnt.cI = 0
+            return { done: true, token: tkn }
+          }
+        }
+
+        // Don't apply text check for special chars or flow context.
         if (ch === '{' || ch === '}' || ch === '[' || ch === ']' ||
             ch === ',' || ch === ':' || ch === '#' || ch === '\n' ||
             ch === '\r' || ch === '"' || ch === "'" || ch === undefined) {
