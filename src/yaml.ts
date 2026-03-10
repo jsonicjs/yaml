@@ -28,6 +28,11 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
 
   let IN = jsonic.token('#IN')
 
+  // Shared anchor storage for the plugin instance.
+  let anchors: Record<string, any> = {}
+  let pendingAnchors: string[] = []
+  let pendingExplicitCL = false
+
   jsonic.options({
     fixed: {
       token: {
@@ -162,6 +167,56 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             pnt.cI = 0
             return { done: true, token: tkn }
           }
+        }
+
+        // YAML tags: !!type value
+        if (ch === '!' && fwd[1] === '!') {
+          let tagEnd = 2
+          while (tagEnd < fwd.length && fwd[tagEnd] !== ' ' && fwd[tagEnd] !== '\n' &&
+                 fwd[tagEnd] !== '\r') tagEnd++
+          let tag = fwd.substring(2, tagEnd)
+          // For !!seq and !!map, these are handled in the yamlMatcher.
+          if (tag === 'seq' || tag === 'map') {
+            return null  // Don't advance pnt — let yamlMatcher handle it.
+          }
+          // For value tags, parse the value after the tag.
+          let valStart = tagEnd
+          if (fwd[valStart] === ' ') valStart++
+          // Get the raw value string.
+          let rawVal = ''
+          let valEnd = valStart
+          if (fwd[valStart] === '"' || fwd[valStart] === "'") {
+            // Quoted value — find matching close quote.
+            let q = fwd[valStart]
+            valEnd = valStart + 1
+            while (valEnd < fwd.length && fwd[valEnd] !== q) {
+              if (fwd[valEnd] === '\\' && q === '"') valEnd++  // Skip escape in double quotes.
+              valEnd++
+            }
+            if (fwd[valEnd] === q) valEnd++
+            rawVal = fwd.substring(valStart + 1, valEnd - 1)
+          } else {
+            // Unquoted value — to end of line.
+            while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r') valEnd++
+            rawVal = fwd.substring(valStart, valEnd).replace(/\s+$/, '')
+          }
+          // Apply tag conversion.
+          let result: any
+          if (tag === 'str') result = String(rawVal)
+          else if (tag === 'int') result = parseInt(rawVal, 10)
+          else if (tag === 'float') result = parseFloat(rawVal)
+          else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
+          else if (tag === 'null') result = null
+          else result = rawVal  // Unknown tag — keep as string.
+
+          let src = fwd.substring(0, valEnd)
+          let tknTin = typeof result === 'string' ? '#TX' :
+                       typeof result === 'number' ? '#NR' :
+                       '#VL'
+          let tkn = lex.token(tknTin, result, src, pnt)
+          pnt.sI += valEnd
+          pnt.cI += valEnd
+          return { done: true, token: tkn }
         }
 
         // Don't apply text check for special chars or flow context.
@@ -300,6 +355,84 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             return function yamlMatcher(lex: Lex) {
               let pnt = lex.pnt
               let fwd = lex.src.substring(pnt.sI)
+
+              // YAML alias: *name — emit a VL token with alias name.
+              // Resolution happens at grammar time (val.ac) since the anchor
+              // may not be recorded yet due to lexer pre-fetching.
+              if (fwd[0] === '*') {
+                let nameEnd = 1
+                while (nameEnd < fwd.length && /[a-zA-Z0-9_-]/.test(fwd[nameEnd])) nameEnd++
+                let name = fwd.substring(1, nameEnd)
+                let src = fwd.substring(0, nameEnd)
+                // Store the alias name as a special marker object.
+                let marker = { __yamlAlias: name }
+                let tkn = lex.token('#VL', marker, src, lex.pnt)
+                pnt.sI += nameEnd
+                pnt.cI += nameEnd
+                return tkn
+              }
+
+              // YAML anchor: &name — store value. Skip the anchor marker,
+              // let the value be parsed, and record it post-parse via grammar rules.
+              if (fwd[0] === '&') {
+                let nameEnd = 1
+                while (nameEnd < fwd.length && /[a-zA-Z0-9_-]/.test(fwd[nameEnd])) nameEnd++
+                let anchorName = fwd.substring(1, nameEnd)
+                let skip = nameEnd
+                if (fwd[skip] === ' ') skip++
+                pnt.sI += skip
+                pnt.cI += skip
+                // Push pending anchor name.
+                pendingAnchors.push(anchorName)
+                // Update fwd and continue matching.
+                fwd = lex.src.substring(pnt.sI)
+              }
+
+              // Skip !!seq and !!map tags — just consume and return undefined
+              // so the next lex cycle handles the actual structure.
+              if (fwd[0] === '!' && fwd[1] === '!' &&
+                  ((fwd[2] === 's' && fwd[3] === 'e' && fwd[4] === 'q') ||
+                   (fwd[2] === 'm' && fwd[3] === 'a' && fwd[4] === 'p'))) {
+                let skip = 5
+                while (skip < fwd.length && fwd[skip] === ' ') skip++
+                pnt.sI += skip
+                pnt.cI += skip
+                // Don't return a token — let the next lex cycle see the actual value.
+                fwd = lex.src.substring(pnt.sI)
+                // Fall through to continue matching.
+              }
+
+              // Emit pending CL from explicit key.
+              if (pendingExplicitCL) {
+                pendingExplicitCL = false
+                let tkn = lex.token('#CL', 1, ': ', lex.pnt)
+                return tkn
+              }
+
+              // YAML explicit key indicator: ? key\n: value
+              if (fwd[0] === '?' && (fwd[1] === ' ' || fwd[1] === '\n')) {
+                let start = fwd[1] === ' ' ? 2 : 1
+                let keyEnd = start
+                while (keyEnd < fwd.length && fwd[keyEnd] !== '\n' && fwd[keyEnd] !== '\r') keyEnd++
+                let key = fwd.substring(start, keyEnd).replace(/\s+$/, '')
+                let src = fwd.substring(0, keyEnd)
+                // Consume "? key" line.
+                pnt.sI += keyEnd
+                pnt.cI += keyEnd
+                // Consume newline.
+                if (pnt.sI < lex.src.length && lex.src[pnt.sI] === '\r') pnt.sI++
+                if (pnt.sI < lex.src.length && lex.src[pnt.sI] === '\n') { pnt.sI++; pnt.rI++ }
+                // Consume ": " on the next line.
+                if (pnt.sI < lex.src.length && lex.src[pnt.sI] === ':') {
+                  pnt.sI++
+                  if (pnt.sI < lex.src.length && lex.src[pnt.sI] === ' ') pnt.sI++
+                }
+                pnt.cI = 1
+                // Emit KEY token now, CL on next call.
+                pendingExplicitCL = true
+                let tkn = lex.token('#TX', key, src, lex.pnt)
+                return tkn
+              }
 
               // YAML document markers: --- and ...
               // --- starts a document (skip it), ... ends the document.
@@ -503,9 +636,43 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
       }
     ])
 
+    // Claim pending anchors after first token is processed.
+    rulespec.ao((rule: Rule) => {
+      if (pendingAnchors.length > 0) {
+        rule.u.yamlAnchorNames = [...pendingAnchors]
+        pendingAnchors.length = 0
+      }
+    })
+
     rulespec.bc((rule: Rule) => {
       if (rule.u.yamlEmpty) {
         rule.node = undefined
+      }
+    })
+
+    // Record anchors and resolve aliases after val is fully resolved.
+    rulespec.ac((rule: Rule) => {
+      // Resolve alias markers to actual values.
+      if (rule.node && typeof rule.node === 'object' &&
+          rule.node.__yamlAlias) {
+        let name = rule.node.__yamlAlias
+        let val = anchors[name]
+        if (typeof val === 'object' && val !== null) {
+          rule.node = JSON.parse(JSON.stringify(val))
+        } else {
+          rule.node = val
+        }
+      }
+
+      // Record anchors only if this val claimed them.
+      if (rule.u.yamlAnchorNames) {
+        for (let name of rule.u.yamlAnchorNames) {
+          let val = rule.node
+          if (typeof val === 'object' && val !== null) {
+            val = JSON.parse(JSON.stringify(val))
+          }
+          anchors[name] = val
+        }
       }
     })
   })
@@ -579,6 +746,27 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
       },
     ])
 
+    // Handle merge keys after all pairs are collected.
+    rulespec.ac((rule: Rule) => {
+      if (rule.node && typeof rule.node === 'object' && '<<' in rule.node) {
+        let mergeVal = rule.node['<<']
+        delete rule.node['<<']
+        if (Array.isArray(mergeVal)) {
+          for (let m of mergeVal) {
+            if (typeof m === 'object' && m !== null && !Array.isArray(m)) {
+              for (let k of Object.keys(m)) {
+                if (!(k in rule.node)) rule.node[k] = m[k]
+              }
+            }
+          }
+        } else if (typeof mergeVal === 'object' && mergeVal !== null) {
+          for (let k of Object.keys(mergeVal)) {
+            if (!(k in rule.node)) rule.node[k] = mergeVal[k]
+          }
+        }
+      }
+    })
+
     rulespec.close([
       // Dedent: indent is smaller than current level => close this map.
       {
@@ -598,6 +786,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
       // End of input in pair open: close gracefully.
       { s: [ZZ], b: 1 },
     ])
+
 
     rulespec.close([
       // Same indent level: continue with next pair.
