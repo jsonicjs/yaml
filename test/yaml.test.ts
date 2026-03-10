@@ -1,10 +1,10 @@
-/* Copyright (c) 2021 Richard Rodger and other contributors, MIT License */
+/* Copyright (c) 2021-2025 Richard Rodger and other contributors, MIT License */
 
+import { test, describe } from 'node:test'
+import { expect } from '@hapi/code'
 
-import { Jsonic, Rule } from 'jsonic'
-import { Yaml } from '../yaml'
-
-
+import { Jsonic } from 'jsonic'
+import { Yaml } from '../dist/yaml'
 
 
 describe('yaml', () => {
@@ -20,13 +20,8 @@ c:
   f:
   - g
   - h
-`)).toEqual({ a: 1, b: 2, c: { d: 3, e: 4, f: ['g', 'h'] } })
+`)).equal({ a: 1, b: 2, c: { d: 3, e: 4, f: ['g', 'h'] } })
 
   })
 
 })
-
-
-
-
-

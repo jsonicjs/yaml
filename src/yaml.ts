@@ -1,4 +1,4 @@
-/* Copyright (c) 2021 Richard Rodger, MIT License */
+/* Copyright (c) 2021-2025 Richard Rodger, MIT License */
 
 
 import {
@@ -8,8 +8,8 @@ import {
   Plugin,
   Config,
   Options,
-  Lex,
   Context,
+  Lex,
 } from 'jsonic'
 
 
@@ -17,7 +17,7 @@ type YamlOptions = {
 }
 
 
-const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
+const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
   let TX = jsonic.token.TX
   let CL = jsonic.token.CL
 
@@ -42,42 +42,50 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
   // Get the Tin (Token id number) for #EL.
   let EL = jsonic.token('#EL')
 
-  // console.log(jsonic.internal().config.fixed)
-
   // Add a custom lex matcher for YAML special cases.
-  jsonic.lex((_cfg: Config, _opts: Options) => {
+  // Use a low order number so this matcher runs before the built-in
+  // matchers (which start at 1e6), preventing lexer.lineMatcher and
+  // lexer.spaceMatcher from incorrectly matching indentation.
+  jsonic.options({
+    lex: {
+      match: {
+        yaml: {
+          order: 5e5,
+          make: (_cfg: Config, _opts: Options) => {
+            return function yamlMatcher(lex: Lex) {
+              let pnt = lex.pnt
+              let fwd = lex.src.substring(pnt.sI)
 
-    return function yamlMatcher(lex: Lex) {
-      let pnt = lex.pnt
-      let fwd = lex.src.substring(pnt.sI)
+              // Yaml colons are ': ' and ':<newline>'.
+              let colon = fwd.match(/^:( |\r?\n)/)
+              if (colon) {
+                // NOTE: Don't consume newline! leave it for #IN,
+                // so it can match properly.
+                // Even though the match is <:\n> (say), only move
+                // point past the ':'. This is unusual - lex matchers
+                // normally consume the entire token string.
+                // (In the case ': ', the space will just get ignored).
+                let tkn = lex.token('#CL', 1, colon[0], lex.pnt)
+                pnt.sI += 1
 
-      // Yaml colons are ': ' and ':<newline>'.
-      let colon = fwd.match(/^:( |\r?\n)/)
-      if (colon) {
-        // NOTE: Don't consume newline! leave it for #IN, so it can match properly.
-        // Even though the match is <:\n> (say), only move point past the ':'.
-        // This is unusual - lex matchers normally consume the entire token string.
-        // (In the case ': ', the space will just get ignored).
-        let tkn = lex.token('#CL', 1, colon[0], lex.pnt)
-        pnt.sI += 1
+                pnt.rI += ' ' != colon[1] ? 1 : 0
+                pnt.cI += ' ' == colon[1] ? 2 : 0
+                return tkn
+              }
 
-        pnt.rI += ' ' != colon[1] ? 1 : 0
-        pnt.cI += ' ' == colon[1] ? 2 : 0
-        return tkn
-      }
-
-      // Indentation is significant. This works because jsonic.lex
-      // inserts the matcher before existing matchers, so
-      // lexer.lineMatcher and lexer.spaceMatcher won't get a chance
-      // to incorrectly match an indent.
-      let spaces = fwd.match(/^\r?\n +/)
-      if (spaces) {
-        let len = spaces[0].length
-        let tkn = lex.token('#IN', len, spaces[0], lex.pnt)
-        pnt.sI += len
-        pnt.rI += 1
-        pnt.cI = len
-        return tkn
+              // Indentation is significant.
+              let spaces = fwd.match(/^\r?\n +/)
+              if (spaces) {
+                let len = spaces[0].length
+                let tkn = lex.token('#IN', len, spaces[0], lex.pnt)
+                pnt.sI += len
+                pnt.rI += 1
+                pnt.cI = len
+                return tkn
+              }
+            }
+          }
+        }
       }
     }
   })
@@ -150,7 +158,7 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
     rulespec.close([
 
       // Indent is a separator like comma, but only valid if
-      // same size as current indent level.      
+      // same size as current indent level.
       {
         s: [IN],
         c: (rule: Rule, ctx: Context) => {
