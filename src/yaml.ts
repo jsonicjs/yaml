@@ -63,9 +63,15 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         if (ch === '|' || ch === '>') {
           let fold = ch === '>'
           let chomp = 'clip' // default: single trailing newline
+          let explicitIndent = 0
           let idx = 1
-          if (fwd[idx] === '+') { chomp = 'keep'; idx++ }
-          else if (fwd[idx] === '-') { chomp = 'strip'; idx++ }
+          // Parse optional chomping and indentation indicators in either order.
+          // Valid: |, |+, |-, |2, |+2, |-2, |2+, |2-
+          for (let pi = 0; pi < 2; pi++) {
+            if (fwd[idx] === '+') { chomp = 'keep'; idx++ }
+            else if (fwd[idx] === '-') { chomp = 'strip'; idx++ }
+            else if (fwd[idx] >= '1' && fwd[idx] <= '9') { explicitIndent = parseInt(fwd[idx]); idx++ }
+          }
 
           // Must be followed by newline (possibly with trailing spaces/comment)
           while (fwd[idx] === ' ') idx++
@@ -79,13 +85,46 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             if (fwd[idx] === '\r') idx++
             if (fwd[idx] === '\n') idx++
 
-            // Determine block indent from first content line.
-            let blockIndent = 0
-            let tempIdx = idx
-            while (fwd[tempIdx] === ' ') { blockIndent++; tempIdx++ }
-
+            // Determine block indent from first content line,
+            // or use explicit indent indicator if provided.
+            let blockIndent = explicitIndent
             if (blockIndent === 0) {
-              // Empty block scalar.
+              // Auto-detect: skip blank lines, find first content line.
+              let tempIdx = idx
+              while (tempIdx < fwd.length) {
+                let lineSpaces = 0
+                while (tempIdx + lineSpaces < fwd.length && fwd[tempIdx + lineSpaces] === ' ') lineSpaces++
+                let afterSpaces = tempIdx + lineSpaces
+                if (afterSpaces >= fwd.length || fwd[afterSpaces] === '\n' || fwd[afterSpaces] === '\r') {
+                  // Blank line — skip it.
+                  tempIdx = afterSpaces
+                  if (fwd[tempIdx] === '\r') tempIdx++
+                  if (fwd[tempIdx] === '\n') tempIdx++
+                  continue
+                }
+                blockIndent = lineSpaces
+                break
+              }
+            }
+
+            // Determine the indent of the line containing the block indicator.
+            // If blockIndent <= that indent, the block is empty (content must
+            // be more indented than the containing line). Exception: after ---,
+            // the containing indent is effectively -1 so blockIndent 0 is valid.
+            let containingIndent = 0
+            let isDocStart = false
+            {
+              let li = pnt.sI - 1
+              while (li > 0 && lex.src[li - 1] !== '\n' && lex.src[li - 1] !== '\r') li--
+              let lineStart = li
+              while (li < pnt.sI && lex.src[li] === ' ') { containingIndent++; li++ }
+              // Check if this line starts with --- (document start marker).
+              if (lex.src[lineStart] === '-' && lex.src[lineStart+1] === '-' && lex.src[lineStart+2] === '-') {
+                isDocStart = true
+              }
+            }
+            if (blockIndent <= containingIndent && !isDocStart && idx < fwd.length) {
+              // Content is not indented enough — empty block scalar.
               let val = chomp === 'strip' ? '' : chomp === 'keep' ? '\n' : ''
               let src = fwd.substring(0, idx)
               let tkn = lex.token('#TX', val, src, pnt)
@@ -107,7 +146,12 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               // Blank line (only whitespace before newline or end).
               let afterSpaces = pos + lineIndent
               if (afterSpaces >= fwd.length || fwd[afterSpaces] === '\n' || fwd[afterSpaces] === '\r') {
-                lines.push('')
+                // Preserve spaces beyond block indent on blank lines.
+                if (lineIndent > blockIndent) {
+                  lines.push(fwd.substring(pos + blockIndent, afterSpaces))
+                } else {
+                  lines.push('')
+                }
                 pos = afterSpaces
                 if (fwd[pos] === '\r') pos++
                 if (fwd[pos] === '\n') pos++
@@ -117,6 +161,13 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
 
               // Less indent means end of block.
               if (lineIndent < blockIndent) break
+
+              // Stop at document markers (--- or ...) at indent 0.
+              if (lineIndent === 0 &&
+                  ((fwd[pos] === '-' && fwd[pos+1] === '-' && fwd[pos+2] === '-' &&
+                    (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' || fwd[pos+3] === ' ' || fwd[pos+3] === undefined)) ||
+                   (fwd[pos] === '.' && fwd[pos+1] === '.' && fwd[pos+2] === '.' &&
+                    (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' || fwd[pos+3] === ' ' || fwd[pos+3] === undefined)))) break
 
               // Consume the line content (strip block indent).
               let lineStart = pos + blockIndent
@@ -132,19 +183,55 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             // Build the scalar value.
             let val: string
             if (fold) {
-              // Folded: replace single newlines with spaces, preserve double newlines.
-              let parts: string[] = []
-              let current = ''
+              // Folded: newlines between "normal" lines become spaces.
+              // Empty lines and "more indented" lines are preserved literally.
+              let result = ''
+              let prevWasNormal = false
+              let pendingEmptyCount = 0
               for (let li = 0; li < lines.length; li++) {
-                if (lines[li] === '') {
-                  if (current) { parts.push(current); current = '' }
-                  parts.push('')
+                let line = lines[li]
+                let isMore = line.length > 0 && (line[0] === ' ' || line[0] === '\t')
+                let isEmpty = line === ''
+
+                if (isEmpty) {
+                  pendingEmptyCount++
+                } else if (isMore) {
+                  // Flush pending empty lines, with paragraph-close if needed.
+                  if (prevWasNormal && result.length > 0) result += '\n'
+                  for (let ei = 0; ei < pendingEmptyCount; ei++) result += '\n'
+                  pendingEmptyCount = 0
+                  // "More indented" — preserve with newlines around it.
+                  if (result.length > 0 && result[result.length - 1] !== '\n') {
+                    result += '\n'
+                  }
+                  result += line + '\n'
+                  prevWasNormal = false
                 } else {
-                  current = current ? current + ' ' + lines[li] : lines[li]
+                  // Normal line.
+                  if (pendingEmptyCount > 0) {
+                    // Empty lines between content: emit them.
+                    // The transition normal→empty→normal needs paragraph-close \n
+                    // (which counts as the first empty line).
+                    if (prevWasNormal && result.length > 0) {
+                      // First empty line is the paragraph break.
+                      result += '\n'
+                      for (let ei = 1; ei < pendingEmptyCount; ei++) result += '\n'
+                    } else {
+                      for (let ei = 0; ei < pendingEmptyCount; ei++) result += '\n'
+                    }
+                    pendingEmptyCount = 0
+                  }
+                  if (prevWasNormal && result.length > 0 && result[result.length - 1] !== '\n') {
+                    // Join with space (folding).
+                    result += ' '
+                  }
+                  result += line
+                  prevWasNormal = true
                 }
               }
-              if (current) parts.push(current)
-              val = parts.join('\n')
+              // Flush trailing empty lines.
+              for (let ei = 0; ei < pendingEmptyCount; ei++) result += '\n'
+              val = result
             } else {
               // Literal: preserve newlines.
               val = lines.join('\n')
@@ -196,8 +283,13 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             if (fwd[valEnd] === q) valEnd++
             rawVal = fwd.substring(valStart + 1, valEnd - 1)
           } else {
-            // Unquoted value — to end of line.
-            while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r') valEnd++
+            // Unquoted value — to end of line, stopping at `: ` and ` #`.
+            while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r') {
+              if (fwd[valEnd] === ':' && (fwd[valEnd+1] === ' ' || fwd[valEnd+1] === '\n' ||
+                  fwd[valEnd+1] === '\r' || fwd[valEnd+1] === undefined)) break
+              if (fwd[valEnd] === ' ' && fwd[valEnd+1] === '#') break
+              valEnd++
+            }
             rawVal = fwd.substring(valStart, valEnd).replace(/\s+$/, '')
           }
           // Apply tag conversion.
@@ -228,6 +320,23 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
 
         // Match text to end of line, stopping at `: `, `:\n`, ` #`, or newline.
         // This handles YAML plain scalars with multiline continuation.
+        // Detect if we're inside a flow collection (brackets/braces).
+        let inFlowCtx = false
+        {
+          let depth = 0
+          for (let fi = 0; fi < pnt.sI; fi++) {
+            let fc = lex.src[fi]
+            if (fc === '{' || fc === '[') depth++
+            else if (fc === '}' || fc === ']') { if (depth > 0) depth-- }
+            else if (fc === '"') {
+              fi++; while (fi < pnt.sI && lex.src[fi] !== '"') { if (lex.src[fi] === '\\') fi++; fi++ }
+            }
+            else if (fc === "'") {
+              fi++; while (fi < pnt.sI && lex.src[fi] !== "'") { if (lex.src[fi] === "'" && lex.src[fi+1] === "'") fi++; fi++ }
+            }
+          }
+          inFlowCtx = depth > 0
+        }
         // Find key indent by scanning backward to the start of the line.
         let lineStart = pnt.sI
         while (lineStart > 0 && lex.src[lineStart - 1] !== '\n' && lex.src[lineStart - 1] !== '\r') lineStart--
@@ -246,6 +355,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 fwd[i + 1] === '\r' || fwd[i + 1] === undefined)) break
             if (c === ' ' && fwd[i + 1] === '#') break
             if (c === ']' || c === '}') break
+            if (c === ',' && inFlowCtx) break
             line += c
             i++
           }
@@ -388,6 +498,56 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 fwd = lex.src.substring(pnt.sI)
               }
 
+              // YAML directive lines (%YAML, %TAG, %FOO): skip everything
+              // up to the next --- or ... document marker.
+              if (fwd[0] === '%') {
+                let pos = 0
+                while (pos < fwd.length) {
+                  // Check if current line starts with --- or ...
+                  if ((fwd[pos] === '-' && fwd[pos+1] === '-' && fwd[pos+2] === '-' &&
+                       (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' || fwd[pos+3] === ' ' || fwd[pos+3] === '\t' || fwd[pos+3] === undefined)) ||
+                      (fwd[pos] === '.' && fwd[pos+1] === '.' && fwd[pos+2] === '.' &&
+                       (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' || fwd[pos+3] === ' ' || fwd[pos+3] === '\t' || fwd[pos+3] === undefined))) {
+                    break
+                  }
+                  // Skip this line.
+                  while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
+                  if (fwd[pos] === '\r') pos++
+                  if (fwd[pos] === '\n') pos++
+                  pnt.rI++
+                }
+                pnt.sI += pos
+                pnt.cI = 0
+                fwd = lex.src.substring(pnt.sI)
+                // Fall through — next thing should be --- or content.
+              }
+
+              // YAML non-specific tag (! value) or local tag (!name value):
+              // skip the tag and let the value be parsed normally.
+              if (fwd[0] === '!' && fwd[1] !== '!' && fwd[1] !== undefined) {
+                if (fwd[1] === ' ') {
+                  // Non-specific tag: ! value → treat value as string.
+                  let valStart = 2
+                  let valEnd = valStart
+                  while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r') valEnd++
+                  let rawVal = fwd.substring(valStart, valEnd).replace(/\s+$/, '')
+                  let src = fwd.substring(0, valEnd)
+                  let tkn = lex.token('#TX', rawVal, src, lex.pnt)
+                  pnt.sI += valEnd
+                  pnt.cI += valEnd
+                  return tkn
+                }
+                // Local tag: !name value → skip the tag, continue with value.
+                let tagEnd = 1
+                while (tagEnd < fwd.length && fwd[tagEnd] !== ' ' && fwd[tagEnd] !== '\n' &&
+                       fwd[tagEnd] !== '\r') tagEnd++
+                if (fwd[tagEnd] === ' ') tagEnd++ // skip space after tag
+                pnt.sI += tagEnd
+                pnt.cI += tagEnd
+                fwd = lex.src.substring(pnt.sI)
+                // Fall through to parse the value.
+              }
+
               // Skip !!seq and !!map tags — just consume and return undefined
               // so the next lex cycle handles the actual structure.
               if (fwd[0] === '!' && fwd[1] === '!' &&
@@ -400,6 +560,61 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 // Don't return a token — let the next lex cycle see the actual value.
                 fwd = lex.src.substring(pnt.sI)
                 // Fall through to continue matching.
+              }
+
+              // Handle other !!type tags (!!str, !!int, !!float, !!bool, !!null).
+              // These apply a type to the following value. For !!str, the value
+              // is always a string. For others, convert accordingly.
+              if (fwd[0] === '!' && fwd[1] === '!') {
+                let tagEnd = 2
+                while (tagEnd < fwd.length && fwd[tagEnd] !== ' ' && fwd[tagEnd] !== '\n' &&
+                       fwd[tagEnd] !== '\r') tagEnd++
+                let tag = fwd.substring(2, tagEnd)
+                let valStart = tagEnd
+                if (fwd[valStart] === ' ') valStart++
+                let valEnd = valStart
+                // Check for quoted value.
+                if (fwd[valStart] === '"' || fwd[valStart] === "'") {
+                  let q = fwd[valStart]
+                  valEnd = valStart + 1
+                  while (valEnd < fwd.length && fwd[valEnd] !== q) {
+                    if (fwd[valEnd] === '\\' && q === '"') valEnd++
+                    valEnd++
+                  }
+                  if (fwd[valEnd] === q) valEnd++
+                  let rawVal = fwd.substring(valStart + 1, valEnd - 1)
+                  let result: any = rawVal
+                  if (tag === 'int') result = parseInt(rawVal, 10)
+                  else if (tag === 'float') result = parseFloat(rawVal)
+                  else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
+                  else if (tag === 'null') result = null
+                  let tknTin = typeof result === 'string' ? '#TX' :
+                               typeof result === 'number' ? '#NR' : '#VL'
+                  let tkn = lex.token(tknTin, result, fwd.substring(0, valEnd), lex.pnt)
+                  pnt.sI += valEnd
+                  pnt.cI += valEnd
+                  return tkn
+                }
+                // Unquoted: stop at `: `, ` #`, newline.
+                while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r') {
+                  if (fwd[valEnd] === ':' && (fwd[valEnd+1] === ' ' || fwd[valEnd+1] === '\n' ||
+                      fwd[valEnd+1] === '\r' || fwd[valEnd+1] === undefined)) break
+                  if (fwd[valEnd] === ' ' && fwd[valEnd+1] === '#') break
+                  valEnd++
+                }
+                let rawVal = fwd.substring(valStart, valEnd).replace(/\s+$/, '')
+                let result: any = rawVal
+                if (tag === 'str') result = String(rawVal)
+                else if (tag === 'int') result = parseInt(rawVal, 10)
+                else if (tag === 'float') result = parseFloat(rawVal)
+                else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
+                else if (tag === 'null') result = null
+                let tknTin = typeof result === 'string' ? '#TX' :
+                             typeof result === 'number' ? '#NR' : '#VL'
+                let tkn = lex.token(tknTin, result, fwd.substring(0, valEnd), lex.pnt)
+                pnt.sI += valEnd
+                pnt.cI += valEnd
+                return tkn
               }
 
               // Emit pending CL from explicit key.
@@ -437,9 +652,9 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               // YAML document markers: --- and ...
               // --- starts a document (skip it), ... ends the document.
               if ((fwd[0] === '-' && fwd[1] === '-' && fwd[2] === '-' &&
-                   (fwd[3] === '\n' || fwd[3] === '\r' || fwd[3] === ' ' || fwd[3] === undefined)) ||
+                   (fwd[3] === '\n' || fwd[3] === '\r' || fwd[3] === ' ' || fwd[3] === '\t' || fwd[3] === undefined)) ||
                   (fwd[0] === '.' && fwd[1] === '.' && fwd[2] === '.' &&
-                   (fwd[3] === '\n' || fwd[3] === '\r' || fwd[3] === ' ' || fwd[3] === undefined))) {
+                   (fwd[3] === '\n' || fwd[3] === '\r' || fwd[3] === ' ' || fwd[3] === '\t' || fwd[3] === undefined))) {
                 // Consume the marker and rest of line.
                 let pos = 3
                 while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
@@ -458,32 +673,113 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   pnt.end = tkn
                   return tkn
                 } else {
-                  // --- skip it, then consume the newline and emit #IN.
-                  pnt.sI += pos
-                  pnt.rI++
-                  // Consume newline after ---.
-                  if (pnt.sI < lex.src.length && lex.src[pnt.sI] === '\r') pnt.sI++
-                  if (pnt.sI < lex.src.length && lex.src[pnt.sI] === '\n') pnt.sI++
-                  // Count spaces.
-                  let spaces = 0
-                  while (pnt.sI + spaces < lex.src.length && lex.src[pnt.sI + spaces] === ' ') spaces++
-                  pnt.sI += spaces
-                  pnt.cI = spaces
-                  // If nothing left after ---, emit #ZZ.
-                  if (pnt.sI >= lex.src.length) {
-                    let tkn = lex.token('#ZZ', undefined, '', lex.pnt)
-                    pnt.end = tkn
-                    return tkn
+                  // --- handler: check if there's content on the same line.
+                  let afterDash = 3
+                  while (afterDash < fwd.length && fwd[afterDash] === ' ') afterDash++
+                  let restOfLine = fwd.substring(afterDash).split(/[\r\n]/)[0].trim()
+
+                  // Check if there's inline content after ---.
+                  // Anchors (&), tags (!), and empty/comment lines go through
+                  // the normal --- handler. Everything else is inline content.
+                  let dashNextCh = afterDash < fwd.length ? fwd[afterDash] : ''
+                  let hasInlineValue = (
+                    dashNextCh !== '' && dashNextCh !== '\n' && dashNextCh !== '\r' &&
+                    dashNextCh !== '&' && dashNextCh !== '!' && dashNextCh !== '#'
+                  )
+                  if (hasInlineValue) {
+                    // Content after --- (e.g. --- |, --- "foo", --- text)
+                    pnt.sI += afterDash
+                    pnt.cI = afterDash
+                    fwd = lex.src.substring(pnt.sI)
+                    // Fall through to continue matching.
+                  } else {
+                    // Plain --- with nothing (or just a comment) after it.
+                    pnt.sI += pos
+                    pnt.rI++
+                    // Consume newline after ---.
+                    if (pnt.sI < lex.src.length && lex.src[pnt.sI] === '\r') pnt.sI++
+                    if (pnt.sI < lex.src.length && lex.src[pnt.sI] === '\n') pnt.sI++
+                    // Count spaces.
+                    let spaces = 0
+                    while (pnt.sI + spaces < lex.src.length && lex.src[pnt.sI + spaces] === ' ') spaces++
+                    pnt.sI += spaces
+                    pnt.cI = spaces
+                    // If nothing left after ---, emit #ZZ.
+                    if (pnt.sI >= lex.src.length) {
+                      let tkn = lex.token('#ZZ', undefined, '', lex.pnt)
+                      pnt.end = tkn
+                      return tkn
+                    }
+                    // For flow/scalar indicators, don't emit #IN.
+                    let nextCh = lex.src[pnt.sI]
+                    if (nextCh === '{' || nextCh === '[' ||
+                        nextCh === '"' || nextCh === "'") {
+                      fwd = lex.src.substring(pnt.sI)
+                      // Fall through to continue matching.
+                    } else if (spaces === 0 && nextCh !== '-' && nextCh !== '.' &&
+                               nextCh !== '?' && nextCh !== '\n' && nextCh !== '\r') {
+                      // For indent 0 with simple content (not list/map),
+                      // skip #IN and fall through directly to content.
+                      fwd = lex.src.substring(pnt.sI)
+                      // Fall through to continue matching.
+                    } else {
+                      // Emit #IN with the indent level after ---.
+                      let src = fwd.substring(0, pos + 1 + spaces)
+                      let tkn = lex.token('#IN', spaces, src, lex.pnt)
+                      return tkn
+                    }
                   }
-                  // Emit #IN with the indent level after ---.
-                  let src = fwd.substring(0, pos + 1 + spaces)
-                  let tkn = lex.token('#IN', spaces, src, lex.pnt)
-                  return tkn
                 }
+              }
+
+              // Re-check for patterns that may appear after --- fall-through.
+              // Directive lines: skip everything up to --- or content.
+              if (fwd[0] === '%') {
+                let pos = 0
+                while (pos < fwd.length) {
+                  if ((fwd[pos] === '-' && fwd[pos+1] === '-' && fwd[pos+2] === '-' &&
+                       (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' || fwd[pos+3] === ' ' || fwd[pos+3] === '\t' || fwd[pos+3] === undefined)) ||
+                      (fwd[pos] === '.' && fwd[pos+1] === '.' && fwd[pos+2] === '.' &&
+                       (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' || fwd[pos+3] === ' ' || fwd[pos+3] === '\t' || fwd[pos+3] === undefined))) {
+                    break
+                  }
+                  while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
+                  if (fwd[pos] === '\r') pos++
+                  if (fwd[pos] === '\n') pos++
+                  pnt.rI++
+                }
+                pnt.sI += pos
+                pnt.cI = 0
+                fwd = lex.src.substring(pnt.sI)
+              }
+              // Non-specific tag.
+              if (fwd[0] === '!' && fwd[1] === ' ') {
+                let valStart = 2
+                let valEnd = valStart
+                while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r') valEnd++
+                let rawVal = fwd.substring(valStart, valEnd).replace(/\s+$/, '')
+                let src = fwd.substring(0, valEnd)
+                let tkn = lex.token('#TX', rawVal, src, lex.pnt)
+                pnt.sI += valEnd
+                pnt.cI += valEnd
+                return tkn
+              }
+              // Anchor after ---.
+              if (fwd[0] === '&') {
+                let nameEnd = 1
+                while (nameEnd < fwd.length && /[a-zA-Z0-9_-]/.test(fwd[nameEnd])) nameEnd++
+                let anchorName = fwd.substring(1, nameEnd)
+                let skip = nameEnd
+                if (fwd[skip] === ' ') skip++
+                pnt.sI += skip
+                pnt.cI += skip
+                pendingAnchors.push(anchorName)
+                fwd = lex.src.substring(pnt.sI)
               }
 
               // YAML single-quoted string: no backslash escape processing.
               // Only escape is '' (two single quotes) → literal single quote.
+              // Newlines are folded: single newline → space, empty lines → \n.
               if (fwd[0] === "'") {
                 let i = 1
                 let val = ''
@@ -498,6 +794,26 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                       i++
                       break
                     }
+                  } else if (fwd[i] === '\n' || fwd[i] === '\r') {
+                    // Flow scalar line folding.
+                    // Trim trailing whitespace from current content.
+                    val = val.replace(/[ \t]+$/, '')
+                    // Count empty lines (newlines with only whitespace).
+                    let emptyLines = 0
+                    while (i < fwd.length && (fwd[i] === '\n' || fwd[i] === '\r')) {
+                      if (fwd[i] === '\r') i++
+                      if (fwd[i] === '\n') i++
+                      emptyLines++
+                      // Skip leading whitespace on next line.
+                      while (i < fwd.length && (fwd[i] === ' ' || fwd[i] === '\t')) i++
+                    }
+                    if (emptyLines > 1) {
+                      // Each extra empty line becomes a \n.
+                      for (let e = 1; e < emptyLines; e++) val += '\n'
+                    } else {
+                      // Single newline → space (folding).
+                      val += ' '
+                    }
                   } else {
                     val += fwd[i]
                     i++
@@ -510,11 +826,17 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 return tkn
               }
 
-              // YAML element marker: "- " (dash followed by space).
-              if (fwd[0] === '-' && fwd[1] === ' ') {
+              // YAML element marker: "- " or "-\n" or "-" at end.
+              if (fwd[0] === '-' && (fwd[1] === ' ' || fwd[1] === '\n' ||
+                  fwd[1] === '\r' || fwd[1] === undefined)) {
                 let tkn = lex.token('#EL', undefined, '- ', lex.pnt)
-                pnt.sI += 2
-                pnt.cI += 2
+                pnt.sI += 1
+                pnt.cI += 1
+                // Consume the space after dash if present.
+                if (fwd[1] === ' ') {
+                  pnt.sI += 1
+                  pnt.cI += 1
+                }
                 return tkn
               }
 
@@ -535,6 +857,45 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               }
 
               // Match any newline — YAML indentation is significant.
+              // In flow context, newlines are just whitespace — don't emit #IN.
+              // Detect flow context by counting unmatched brackets before current position.
+              if (fwd[0] === '\n' || fwd[0] === '\r') {
+                let inFlow = 0
+                for (let fi = 0; fi < pnt.sI; fi++) {
+                  let fc = lex.src[fi]
+                  if (fc === '{' || fc === '[') inFlow++
+                  else if (fc === '}' || fc === ']') { if (inFlow > 0) inFlow-- }
+                  else if (fc === '"') {
+                    fi++
+                    while (fi < pnt.sI && lex.src[fi] !== '"') {
+                      if (lex.src[fi] === '\\') fi++
+                      fi++
+                    }
+                  }
+                  else if (fc === "'") {
+                    fi++
+                    while (fi < pnt.sI && lex.src[fi] !== "'") {
+                      if (lex.src[fi] === "'" && lex.src[fi + 1] === "'") fi++
+                      fi++
+                    }
+                  }
+                }
+                if (inFlow > 0) {
+                  // Inside flow collection — consume whitespace, don't emit #IN.
+                  let pos = 0
+                  while (pos < fwd.length &&
+                    (fwd[pos] === '\n' || fwd[pos] === '\r' || fwd[pos] === ' ' || fwd[pos] === '\t')) {
+                    pos++
+                  }
+                  // Also skip comment lines inside flow collections.
+                  if (pos < fwd.length && fwd[pos] === '#') {
+                    while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
+                  }
+                  pnt.sI += pos
+                  pnt.cI = 0
+                  return undefined
+                }
+              }
               // Must catch all newlines before the default line/space matchers.
               if (fwd[0] === '\n' || fwd[0] === '\r') {
                 // Consume all blank lines and comment-only lines,
