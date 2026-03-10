@@ -55,7 +55,7 @@ c:
 
     test('empty-value-followed-by-sibling', () => {
       // key with colon-newline but no nested content, then sibling
-      expect(y(`a:\nb: 1`)).equal({ a: undefined, b: 1 })
+      expect(y(`a:\nb: 1`)).equal({ a: null, b: 1 })
     })
 
     test('colon-space-required', () => {
@@ -172,7 +172,7 @@ c:
 
     test('empty-value-null', () => {
       // Empty value after colon should be null/undefined
-      expect(y(`a:`)).equal({ a: undefined })
+      expect(y(`a:`)).equal({ a: null })
     })
 
     test('plain-string', () => {
