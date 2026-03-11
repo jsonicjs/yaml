@@ -86,8 +86,8 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
 
             // Determine block indent from first content line,
             // or use explicit indent indicator if provided.
-            let blockIndent = explicitIndent
-            if (blockIndent === 0) {
+            let blockIndent = 0
+            if (explicitIndent === 0) {
               // Auto-detect: skip blank lines, find first content line.
               let tempIdx = idx
               while (tempIdx < fwd.length) {
@@ -121,6 +121,10 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               if (lex.src[lineStart] === '-' && lex.src[lineStart+1] === '-' && lex.src[lineStart+2] === '-') {
                 isDocStart = true
               }
+            }
+            // Apply explicit indent relative to containing indent.
+            if (explicitIndent > 0) {
+              blockIndent = containingIndent + explicitIndent
             }
             if (blockIndent <= containingIndent && !isDocStart && idx < fwd.length) {
               // Content is not indented enough — empty block scalar.
@@ -691,6 +695,14 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 let valStart = tagEnd
                 if (fwd[valStart] === ' ') valStart++
                 let valEnd = valStart
+                // Skip anchor (&name) if present before value.
+                if (fwd[valStart] === '&') {
+                  let anchorEnd = valStart + 1
+                  while (anchorEnd < fwd.length && fwd[anchorEnd] !== ' ' && fwd[anchorEnd] !== '\n') anchorEnd++
+                  if (fwd[anchorEnd] === ' ') anchorEnd++
+                  valStart = anchorEnd
+                  valEnd = valStart
+                }
                 // Check for quoted value.
                 if (fwd[valStart] === '"' || fwd[valStart] === "'") {
                   let q = fwd[valStart]
@@ -712,14 +724,6 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   pnt.sI += valEnd
                   pnt.cI += valEnd
                   return tkn
-                }
-                // Skip anchor (&name) if present before value.
-                if (fwd[valStart] === '&') {
-                  let anchorEnd = valStart + 1
-                  while (anchorEnd < fwd.length && fwd[anchorEnd] !== ' ' && fwd[anchorEnd] !== '\n') anchorEnd++
-                  if (fwd[anchorEnd] === ' ') anchorEnd++
-                  valStart = anchorEnd
-                  valEnd = valStart
                 }
                 // Unquoted: stop at `: `, ` #`, newline.
                 while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r') {
