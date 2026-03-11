@@ -58,7 +58,6 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         let fwd = lex.src.substring(pnt.sI)
 
         let ch = fwd[0]
-
         // Block scalar: | or > (with optional chomping indicator)
         if (ch === '|' || ch === '>') {
           let fold = ch === '>'
@@ -125,7 +124,21 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             }
             if (blockIndent <= containingIndent && !isDocStart && idx < fwd.length) {
               // Content is not indented enough — empty block scalar.
-              let val = chomp === 'strip' ? '' : chomp === 'keep' ? '\n' : ''
+              // For keep chomping, count trailing blank lines.
+              let val: string
+              if (chomp === 'keep') {
+                let blankCount = 0
+                let bi = idx
+                while (bi < fwd.length) {
+                  if (fwd[bi] === '\n') { blankCount++; bi++ }
+                  else if (fwd[bi] === '\r') { bi++; if (bi < fwd.length && fwd[bi] === '\n') bi++; blankCount++ }
+                  else break
+                }
+                val = '\n'.repeat(blankCount > 0 ? blankCount : 1)
+                idx = bi
+              } else {
+                val = chomp === 'strip' ? '' : ''
+              }
               let src = fwd.substring(0, idx)
               let tkn = lex.token('#TX', val, src, pnt)
               pnt.sI += idx
