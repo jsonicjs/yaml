@@ -537,15 +537,17 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               if (!srcCleaned) {
                 srcCleaned = true
                 let src: string = '' + lex.src
+                let hadDirective = false
                 // Remove leading directive block: everything before ---
                 // when the source starts with a % directive.
                 if (src[0] === '%') {
                   let dIdx = src.indexOf('\n---')
                   if (dIdx >= 0) {
+                    hadDirective = true
                     src = src.substring(dIdx + 1)
-                  } else {
-                    src = src.replace(/^(%[A-Z]+[ \t].*(\r?\n|$))/gm, '')
                   }
+                  // If no --- follows the directive, leave the % lines
+                  // for jsonic to error on (invalid YAML).
                 }
                 // Strip leading comment lines (before ---).
                 while (/^[ \t]*#[^\n]*\n/.test(src) && /\n---/.test(src)) {
@@ -574,12 +576,40 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 }
                 lex.src = src
                 lex.pnt.len = src.length
+                // If source is empty/whitespace/comments-only after preprocessing,
+                // return a VL null token so jsonic resolves to null instead of
+                // creating a #BD error. Only do this when source doesn't start
+                // with an unprocessed % directive (those should error).
+                let stripped = src.replace(/^[ \t]*#[^\n]*(\n|$)/gm, '').trim()
+                if (src[0] !== '%' &&
+                    (src.trim() === '' || stripped === '' ||
+                     /^\.\.\.(?:[ \t]|$)/.test(stripped))) {
+                  lex.pnt.len = 0
+                  let tkn = lex.token('#VL', null, '', lex.pnt)
+                  lex.pnt.sI = 0
+                  return tkn
+                }
               }
               let pnt = lex.pnt
               let fwd = lex.src.substring(pnt.sI)
 
               // Loop to restart matching after consuming flow whitespace.
               yamlMatchLoop: while (true) {
+
+              // Skip blank lines that contain only tabs (and maybe spaces).
+              // YAML treats these as blank lines, but jsonic errors on bare tabs.
+              if (fwd[0] === '\t' || fwd[0] === ' ') {
+                let lineEnd = fwd.indexOf('\n')
+                let lineContent = lineEnd >= 0 ? fwd.substring(0, lineEnd) : fwd
+                if (lineContent.indexOf('\t') >= 0 && /^[ \t]+$/.test(lineContent)) {
+                  let skip = lineEnd >= 0 ? lineEnd + 1 : lineContent.length
+                  pnt.sI += skip
+                  pnt.rI++
+                  pnt.cI = 0
+                  fwd = lex.src.substring(pnt.sI)
+                  continue yamlMatchLoop
+                }
+              }
 
               // YAML alias: *name — emit a VL token with alias name.
               // Resolution happens at grammar time (val.ac) since the anchor
@@ -670,12 +700,13 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 continue yamlMatchLoop
               }
 
-              // Skip !!seq and !!map tags — just consume and return undefined
-              // so the next lex cycle handles the actual structure.
+              // Skip !!seq, !!map, !!omap, !!set, !!binary, etc. tags — just
+              // consume and return undefined so the next lex cycle handles the
+              // actual structure/value.
               if (fwd[0] === '!' && fwd[1] === '!' &&
-                  ((fwd[2] === 's' && fwd[3] === 'e' && fwd[4] === 'q') ||
-                   (fwd[2] === 'm' && fwd[3] === 'a' && fwd[4] === 'p'))) {
-                let skip = 5
+                  /^!!(seq|map|omap|set|pairs|binary|ordered|python\/[^\s]*)\b/.test(fwd)) {
+                let skip = 2
+                while (skip < fwd.length && fwd[skip] !== ' ' && fwd[skip] !== '\n') skip++
                 while (skip < fwd.length && fwd[skip] === ' ') skip++
                 pnt.sI += skip
                 pnt.cI += skip
