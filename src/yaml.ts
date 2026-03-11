@@ -525,7 +525,52 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         yaml: {
           order: 5e5,
           make: (_cfg: Config, _opts: Options) => {
+            let srcCleaned = false
             return function yamlMatcher(lex: Lex) {
+              // On first call, strip YAML document markers and directives
+              // from lex.src. These must be removed before lexing because
+              // jsonic reverts pnt.sI when a lex matcher returns undefined.
+              if (!srcCleaned) {
+                srcCleaned = true
+                let src: string = '' + lex.src
+                // Remove leading directive block: everything before ---
+                // when the source starts with a % directive.
+                if (src[0] === '%') {
+                  let dIdx = src.indexOf('\n---')
+                  if (dIdx >= 0) {
+                    src = src.substring(dIdx + 1)
+                  } else {
+                    src = src.replace(/^(%[A-Z]+[ \t].*(\r?\n|$))/gm, '')
+                  }
+                }
+                // Strip leading comment lines (before ---).
+                while (/^[ \t]*#[^\n]*\n/.test(src) && /\n---/.test(src)) {
+                  src = src.replace(/^[ \t]*#[^\n]*\n/, '')
+                }
+                // Handle document start marker (---).
+                let docMatch = src.match(/^---(?:([ \t]+)(.+))?(\r?\n|$)/)
+                if (docMatch) {
+                  let prefix = docMatch[2] || ''
+                  let rest = src.substring(docMatch[0].length)
+                  let trimmed = prefix.trimStart()
+                  // Don't strip --- when followed by block scalar indicators
+                  // (> or |) — those need --- context for correct parsing.
+                  if (trimmed[0] === '>' || trimmed[0] === '|') {
+                    // Leave --- in place, just truncate at next document marker.
+                  } else if (prefix && trimmed[0] !== '#') {
+                    src = prefix + (docMatch[3] || '') + rest
+                  } else {
+                    src = rest
+                  }
+                }
+                // Truncate at the next document marker (---, ..., or %YAML/%TAG at column 0).
+                let endMatch = src.match(/^(---|\.\.\.|(%)(?:YAML|TAG)[ \t])(?:[ \t]|$)/m)
+                if (endMatch && endMatch.index !== undefined && endMatch.index > 0) {
+                  src = src.substring(0, endMatch.index)
+                }
+                lex.src = src
+                lex.pnt.len = src.length
+              }
               let pnt = lex.pnt
               let fwd = lex.src.substring(pnt.sI)
 
@@ -617,7 +662,8 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 pnt.sI += tagEnd
                 pnt.cI += tagEnd
                 fwd = lex.src.substring(pnt.sI)
-                // Fall through to parse the value.
+                // Restart matching to parse the value.
+                continue yamlMatchLoop
               }
 
               // Skip !!seq and !!map tags — just consume and return undefined
@@ -666,6 +712,14 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   pnt.sI += valEnd
                   pnt.cI += valEnd
                   return tkn
+                }
+                // Skip anchor (&name) if present before value.
+                if (fwd[valStart] === '&') {
+                  let anchorEnd = valStart + 1
+                  while (anchorEnd < fwd.length && fwd[anchorEnd] !== ' ' && fwd[anchorEnd] !== '\n') anchorEnd++
+                  if (fwd[anchorEnd] === ' ') anchorEnd++
+                  valStart = anchorEnd
+                  valEnd = valStart
                 }
                 // Unquoted: stop at `: `, ` #`, newline.
                 while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r') {
