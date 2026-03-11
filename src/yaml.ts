@@ -313,8 +313,14 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
 
         // Don't apply text check for special chars or flow context.
         if (ch === '{' || ch === '}' || ch === '[' || ch === ']' ||
-            ch === ',' || ch === ':' || ch === '#' || ch === '\n' ||
+            ch === ',' || ch === '#' || ch === '\n' ||
             ch === '\r' || ch === '"' || ch === "'" || ch === undefined) {
+          return null
+        }
+        // Colon only starts a key-value separator if followed by space/tab/newline/eof.
+        // Otherwise it can start a plain scalar (e.g. ::vector).
+        if (ch === ':' && (fwd[1] === ' ' || fwd[1] === '\t' || fwd[1] === '\n' ||
+            fwd[1] === '\r' || fwd[1] === undefined)) {
           return null
         }
 
@@ -926,9 +932,30 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 return tkn
               }
 
-              // Yaml colons are ': ', ':\t', ':<newline>', or ':' at end of input.
+              // Yaml colons are ': ', ':\t', ':<newline>', ':' at end of input,
+              // or ':' in flow context (JSON-compatible, e.g. {"key":value}).
+              // In flow context, detect by checking if the previous non-whitespace
+              // token was a quoted string followed immediately by ':'.
+              let isFlowColon = false
+              if (fwd[0] === ':' && fwd[1] !== ' ' && fwd[1] !== '\t' &&
+                  fwd[1] !== '\n' && fwd[1] !== '\r' && fwd[1] !== undefined) {
+                // Check if we're in a flow context.
+                let flowDepth = 0
+                for (let fi = 0; fi < pnt.sI; fi++) {
+                  let fc = lex.src[fi]
+                  if (fc === '{' || fc === '[') flowDepth++
+                  else if (fc === '}' || fc === ']') { if (flowDepth > 0) flowDepth-- }
+                  else if (fc === '"') {
+                    fi++; while (fi < pnt.sI && lex.src[fi] !== '"') { if (lex.src[fi] === '\\') fi++; fi++ }
+                  }
+                  else if (fc === "'") {
+                    fi++; while (fi < pnt.sI && lex.src[fi] !== "'") { if (lex.src[fi] === "'" && lex.src[fi+1] === "'") fi++; fi++ }
+                  }
+                }
+                if (flowDepth > 0) isFlowColon = true
+              }
               if (fwd[0] === ':' && (fwd[1] === ' ' || fwd[1] === '\t' || fwd[1] === '\n' ||
-                  fwd[1] === '\r' || fwd[1] === undefined)) {
+                  fwd[1] === '\r' || fwd[1] === undefined || isFlowColon)) {
                 let tkn = lex.token('#CL', 1, ': ', lex.pnt)
                 pnt.sI += 1
                 if (fwd[1] === ' ' || fwd[1] === '\t') {
@@ -1150,7 +1177,10 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         // A plain value after indent (for nested scalars).
         {
           s: [KEY],
-          b: 1,
+          a: (rule: Rule) => {
+            rule.node = ST === rule.o0.tin || TX === rule.o0.tin
+              ? rule.o0.val : rule.o0.src
+          },
         }
       ])
 
