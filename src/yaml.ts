@@ -1019,15 +1019,16 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 // indented content, fall through to produce default value.
                 if ((fwd[valStart] === '\n' || fwd[valStart] === '\r') &&
                     valStart < fwd.length - 1) {
-                  let nextLineStart = valStart + 1
-                  if (fwd[nextLineStart] === '\n' || fwd[nextLineStart] === ' ') {
-                    // Content on next line — skip tag, let it be parsed.
-                    pnt.sI += valStart + 1
-                    pnt.cI = 0
-                    pnt.rI++
-                    fwd = lex.src.substring(pnt.sI)
-                    continue yamlMatchLoop
-                  }
+                  // Tag followed by newline — skip the tag and let the
+                  // next lex cycle handle the value on the following line.
+                  let nl = valStart
+                  if (fwd[nl] === '\r') nl++
+                  if (fwd[nl] === '\n') nl++
+                  pnt.sI += nl
+                  pnt.cI = 0
+                  pnt.rI++
+                  fwd = lex.src.substring(pnt.sI)
+                  continue yamlMatchLoop
                 }
                 // Unquoted: stop at `: `, ` #`, newline, flow indicators.
                 while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r' &&
@@ -1569,6 +1570,16 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   if (fwd[pos] === '#') {
                     while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
                     continue
+                  }
+                  // If the line is whitespace-only (tabs and/or spaces),
+                  // treat it as a blank line and continue.
+                  if (fwd[pos] === '\t') {
+                    let tp = pos
+                    while (tp < fwd.length && (fwd[tp] === ' ' || fwd[tp] === '\t')) tp++
+                    if (tp >= fwd.length || fwd[tp] === '\n' || fwd[tp] === '\r') {
+                      pos = tp
+                      continue
+                    }
                   }
                   // If the line is an anchor-only line (&name with nothing after),
                   // consume it (record the anchor) and continue to the next line
