@@ -300,7 +300,11 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             }
 
             // Apply chomping.
-            if (chomp === 'strip') {
+            if (lines.length === 0) {
+              // No content lines at all — result is empty string
+              // regardless of chomping.
+              val = ''
+            } else if (chomp === 'strip') {
               val = val.replace(/\n+$/, '')
             } else if (chomp === 'clip') {
               val = val.replace(/\n+$/, '') + '\n'
@@ -668,7 +672,15 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   if (trimmed[0] === '>' || trimmed[0] === '|') {
                     // Leave --- in place, just truncate at next document marker.
                   } else if (prefix && trimmed[0] !== '#') {
-                    src = prefix + (docMatch[3] || '') + rest
+                    // If the inline content is a structural tag (!!map, !!seq,
+                    // !!omap, etc.), strip the tag along with --- since the
+                    // parser handles these structures implicitly.
+                    let structTagMatch = trimmed.match(/^!!(seq|map|omap|set|pairs|binary|ordered)\s*$/)
+                    if (structTagMatch) {
+                      src = rest
+                    } else {
+                      src = prefix + (docMatch[3] || '') + rest
+                    }
                     docStripped = true
                   } else {
                     src = rest
@@ -676,9 +688,46 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   }
                 }
                 // Truncate at the next document marker (---, ..., or %YAML/%TAG at column 0).
-                let endMatch = src.match(/^(---|\.\.\.|(%)(?:YAML|TAG)[ \t])(?:[ \t]|$)/m)
-                if (endMatch && endMatch.index !== undefined && endMatch.index > 0) {
-                  src = src.substring(0, endMatch.index)
+                // Use a manual search to skip markers inside quoted strings.
+                {
+                  let searchPos = 0
+                  let truncateAt = -1
+                  while (searchPos < src.length) {
+                    // Skip quoted strings.
+                    if (src[searchPos] === '"') {
+                      searchPos++
+                      while (searchPos < src.length && src[searchPos] !== '"') {
+                        if (src[searchPos] === '\\') searchPos++
+                        searchPos++
+                      }
+                      if (searchPos < src.length) searchPos++ // skip closing quote
+                      continue
+                    }
+                    if (src[searchPos] === "'") {
+                      searchPos++
+                      while (searchPos < src.length && src[searchPos] !== "'") {
+                        if (src[searchPos] === "'" && src[searchPos + 1] === "'") searchPos++
+                        searchPos++
+                      }
+                      if (searchPos < src.length) searchPos++ // skip closing quote
+                      continue
+                    }
+                    // Check for document marker at start of line.
+                    if (searchPos > 0 && (src[searchPos - 1] === '\n' || src[searchPos - 1] === '\r')) {
+                      let marker = src.substring(searchPos, searchPos + 3)
+                      let after = src[searchPos + 3]
+                      if ((marker === '---' || marker === '...') &&
+                          (after === ' ' || after === '\t' || after === '\n' ||
+                           after === '\r' || after === undefined)) {
+                        truncateAt = searchPos
+                        break
+                      }
+                    }
+                    searchPos++
+                  }
+                  if (truncateAt > 0) {
+                    src = src.substring(0, truncateAt)
+                  }
                 }
                 // After stripping first ---, if remaining is just another ---
                 // or ..., the document is empty.
@@ -727,6 +776,14 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 }
               }
 
+              // Emit pending CL from explicit key — must be before !!type handlers
+              // so the CL token appears before the value token.
+              if (pendingExplicitCL) {
+                pendingExplicitCL = false
+                let tkn = lex.token('#CL', 1, ': ', lex.pnt)
+                return tkn
+              }
+
               // YAML alias: *name — emit a VL token with alias name.
               // Resolution happens at grammar time (val.ac) since the anchor
               // may not be recorded yet due to lexer pre-fetching.
@@ -771,13 +828,48 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                        fwd[nameEnd] !== ']') nameEnd++
                 let anchorName = fwd.substring(1, nameEnd)
                 let skip = nameEnd
-                if (fwd[skip] === ' ') skip++
+                if (fwd[skip] === ' ' || fwd[skip] === '\t') skip++
+                // Check if anchor is standalone (first content on its line).
+                // Look backward to see if only whitespace precedes & on this line.
+                let isStandalone = true
+                let anchorIndent = 0
+                {
+                  let bi = pnt.sI - 1
+                  while (bi >= 0 && lex.src[bi] !== '\n' && lex.src[bi] !== '\r') {
+                    if (lex.src[bi] !== ' ' && lex.src[bi] !== '\t') {
+                      isStandalone = false
+                      break
+                    }
+                    anchorIndent++
+                    bi--
+                  }
+                }
                 pnt.sI += skip
                 pnt.cI += skip
                 // Push pending anchor name.
                 pendingAnchors.push(anchorName)
+                // If anchor is standalone on its own line (followed by newline),
+                // consume the newline and leading spaces so no extra IN token
+                // is emitted. Only consume when next line indent >= anchor indent,
+                // otherwise let the normal indent handler manage the transition.
+                if (isStandalone &&
+                    (lex.src[pnt.sI] === '\r' || lex.src[pnt.sI] === '\n')) {
+                  let nl = pnt.sI
+                  if (lex.src[nl] === '\r') nl++
+                  if (lex.src[nl] === '\n') nl++
+                  let spaces = 0
+                  while (nl + spaces < lex.src.length && lex.src[nl + spaces] === ' ') spaces++
+                  let nextCh = lex.src[nl + spaces]
+                  if (nextCh !== undefined && nextCh !== '\n' && nextCh !== '\r' &&
+                      spaces >= anchorIndent) {
+                    pnt.sI = nl + spaces
+                    pnt.cI = spaces
+                    pnt.rI++
+                  }
+                }
                 // Update fwd and continue matching.
                 fwd = lex.src.substring(pnt.sI)
+                continue yamlMatchLoop
               }
 
               // YAML directive lines (%YAML, %TAG, %FOO): skip everything
@@ -839,11 +931,43 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 let skip = 2
                 while (skip < fwd.length && fwd[skip] !== ' ' && fwd[skip] !== '\n') skip++
                 while (skip < fwd.length && fwd[skip] === ' ') skip++
+                // Check if tag is standalone on its own line.
+                let tagIndent = 0
+                {
+                  let bi = pnt.sI - 1
+                  let standalone = true
+                  while (bi >= 0 && lex.src[bi] !== '\n' && lex.src[bi] !== '\r') {
+                    if (lex.src[bi] !== ' ' && lex.src[bi] !== '\t') {
+                      standalone = false
+                      break
+                    }
+                    tagIndent++
+                    bi--
+                  }
+                  // If standalone and next line is at the same indent, consume
+                  // the newline so no extra IN token is emitted.
+                  if (standalone && skip < fwd.length &&
+                      (fwd[skip] === '\n' || fwd[skip] === '\r')) {
+                    let nl = skip
+                    if (fwd[nl] === '\r') nl++
+                    if (fwd[nl] === '\n') nl++
+                    let spaces = 0
+                    while (nl + spaces < fwd.length && fwd[nl + spaces] === ' ') spaces++
+                    if (spaces >= tagIndent) {
+                      skip = nl + spaces
+                      pnt.sI += skip
+                      pnt.cI = spaces
+                      pnt.rI++
+                      fwd = lex.src.substring(pnt.sI)
+                      continue yamlMatchLoop
+                    }
+                  }
+                }
                 pnt.sI += skip
                 pnt.cI += skip
                 // Don't return a token — let the next lex cycle see the actual value.
                 fwd = lex.src.substring(pnt.sI)
-                // Fall through to continue matching.
+                continue yamlMatchLoop
               }
 
               // Handle other !!type tags (!!str, !!int, !!float, !!bool, !!null).
@@ -852,7 +976,9 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               if (fwd[0] === '!' && fwd[1] === '!') {
                 let tagEnd = 2
                 while (tagEnd < fwd.length && fwd[tagEnd] !== ' ' && fwd[tagEnd] !== '\n' &&
-                       fwd[tagEnd] !== '\r') tagEnd++
+                       fwd[tagEnd] !== '\r' && fwd[tagEnd] !== ',' &&
+                       fwd[tagEnd] !== '}' && fwd[tagEnd] !== ']' &&
+                       fwd[tagEnd] !== ':') tagEnd++
                 let tag = fwd.substring(2, tagEnd)
                 let valStart = tagEnd
                 if (fwd[valStart] === ' ') valStart++
@@ -918,18 +1044,14 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 else if (tag === 'float') result = parseFloat(rawVal)
                 else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
                 else if (tag === 'null') result = null
-                let tknTin = typeof result === 'string' ? '#TX' :
+                // Use #ST for empty strings (jsonic handles #ST better than
+                // empty #TX in flow context), #NR for numbers, #VL for null.
+                let tknTin = (typeof result === 'string' && result === '') ? '#ST' :
+                             typeof result === 'string' ? '#TX' :
                              typeof result === 'number' ? '#NR' : '#VL'
                 let tkn = lex.token(tknTin, result, fwd.substring(0, valEnd), lex.pnt)
                 pnt.sI += valEnd
                 pnt.cI += valEnd
-                return tkn
-              }
-
-              // Emit pending CL from explicit key.
-              if (pendingExplicitCL) {
-                pendingExplicitCL = false
-                let tkn = lex.token('#CL', 1, ': ', lex.pnt)
                 return tkn
               }
 
@@ -950,6 +1072,13 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   keyEnd++
                 }
                 key = fwd.substring(start, keyEnd).replace(/\s+$/, '')
+                // Strip !!type tags from explicit keys and apply conversion.
+                let explicitKeyTag = ''
+                let tagMatch = key.match(/^!!(\w+)\s+(.*)$/)
+                if (tagMatch) {
+                  explicitKeyTag = tagMatch[1]
+                  key = tagMatch[2]
+                }
                 let consumed = keyEnd
                 // Track position before consuming newline (for !hasValue case).
                 let beforeNewline = consumed
@@ -1440,6 +1569,26 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   if (fwd[pos] === '#') {
                     while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
                     continue
+                  }
+                  // If the line is an anchor-only line (&name with nothing after),
+                  // consume it (record the anchor) and continue to the next line
+                  // so the indent is determined by actual content.
+                  if (fwd[pos] === '&') {
+                    let ae = pos + 1
+                    while (ae < fwd.length && fwd[ae] !== ' ' && fwd[ae] !== '\t' &&
+                           fwd[ae] !== '\n' && fwd[ae] !== '\r') ae++
+                    let afterAnchor = ae
+                    while (afterAnchor < fwd.length &&
+                           (fwd[afterAnchor] === ' ' || fwd[afterAnchor] === '\t')) afterAnchor++
+                    if (afterAnchor >= fwd.length || fwd[afterAnchor] === '\n' ||
+                        fwd[afterAnchor] === '\r' || fwd[afterAnchor] === '#') {
+                      pendingAnchors.push(fwd.substring(pos + 1, ae))
+                      // Skip to end of line (including any comment).
+                      while (afterAnchor < fwd.length &&
+                             fwd[afterAnchor] !== '\n' && fwd[afterAnchor] !== '\r') afterAnchor++
+                      pos = afterAnchor
+                      continue
+                    }
                   }
                 }
 
