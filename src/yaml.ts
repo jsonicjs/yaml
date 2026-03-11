@@ -356,11 +356,24 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           }
           inFlowCtx = depth > 0
         }
-        // Find key indent by scanning backward to the start of the line.
+        // Find key indent: the indent of the parent structure's line.
+        // Scan backward to find the previous line's indent, since the current
+        // text may be on a continuation line indented more than its parent key.
         let lineStart = pnt.sI
         while (lineStart > 0 && lex.src[lineStart - 1] !== '\n' && lex.src[lineStart - 1] !== '\r') lineStart--
+        // Check if there's a previous line (for multiline value on a new line after key:).
         let keyIndent = 0
-        while (lineStart + keyIndent < lex.src.length && lex.src[lineStart + keyIndent] === ' ') keyIndent++
+        let prevLineStart = lineStart
+        if (prevLineStart > 0) {
+          // Skip past the newline to the previous line.
+          let pi = prevLineStart - 1
+          if (pi >= 0 && lex.src[pi] === '\n') pi--
+          if (pi >= 0 && lex.src[pi] === '\r') pi--
+          // Find the start of the previous line.
+          while (pi > 0 && lex.src[pi - 1] !== '\n' && lex.src[pi - 1] !== '\r') pi--
+          // Count indent of the previous line.
+          while (pi < prevLineStart && lex.src[pi] === ' ') { keyIndent++; pi++ }
+        }
         let text = ''
         let i = 0
         let totalConsumed = 0
@@ -372,7 +385,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             if (c === '\n' || c === '\r') break
             if (c === ':' && (fwd[i + 1] === ' ' || fwd[i + 1] === '\t' || fwd[i + 1] === '\n' ||
                 fwd[i + 1] === '\r' || fwd[i + 1] === undefined)) break
-            if (c === ' ' && fwd[i + 1] === '#') break
+            if ((c === ' ' || c === '\t') && fwd[i + 1] === '#') break
             if (inFlowCtx && (c === ']' || c === '}')) break
             if (c === ',' && inFlowCtx) break
             line += c
@@ -385,11 +398,26 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         totalConsumed = i
 
         // Check for continuation lines (multiline plain scalars).
+        // Blank lines (whitespace-only) within a scalar become newlines.
         while (i < fwd.length && (fwd[i] === '\n' || fwd[i] === '\r')) {
           let nlPos = i
-          if (fwd[i] === '\r') i++
-          if (fwd[i] === '\n') i++
-          // Count indent of next line.
+          // Count blank lines (lines with only whitespace).
+          let blankLines = 0
+          while (i < fwd.length && (fwd[i] === '\n' || fwd[i] === '\r')) {
+            if (fwd[i] === '\r') i++
+            if (fwd[i] === '\n') i++
+            // Count indent of next line.
+            let li = 0
+            while (i + li < fwd.length && (fwd[i + li] === ' ' || fwd[i + li] === '\t')) li++
+            if (i + li >= fwd.length || fwd[i + li] === '\n' || fwd[i + li] === '\r') {
+              // Blank line — count it and skip.
+              blankLines++
+              i += li
+              continue
+            }
+            break
+          }
+          // Count indent of the content line after blank lines.
           let lineIndent = 0
           while (i < fwd.length && (fwd[i] === ' ' || fwd[i] === '\t')) { lineIndent++; i++ }
           // In flow context, continuation is allowed regardless of indent
@@ -421,7 +449,13 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             if (!isKV || inFlowCtx) {
               let contLine = scanLine()
               if (contLine.length > 0) {
-                text += ' ' + contLine
+                // Blank lines → newlines; single newline → space (folding).
+                if (blankLines > 0) {
+                  for (let b = 0; b < blankLines; b++) text += '\n'
+                } else {
+                  text += ' '
+                }
+                text += contLine
                 totalConsumed = i
                 rows++
                 continue
@@ -945,6 +979,33 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 return tkn
               }
 
+              // Plain scalars starting with digits but containing colons (e.g. 20:03:20)
+              // must be captured before jsonic's number matcher grabs just the digits.
+              if (fwd[0] >= '0' && fwd[0] <= '9') {
+                let hasEmbeddedColon = false
+                let pi = 1
+                while (pi < fwd.length && fwd[pi] !== '\n' && fwd[pi] !== '\r') {
+                  if (fwd[pi] === ':' && fwd[pi + 1] !== ' ' && fwd[pi + 1] !== '\t' &&
+                      fwd[pi + 1] !== '\n' && fwd[pi + 1] !== '\r' && fwd[pi + 1] !== undefined) {
+                    hasEmbeddedColon = true
+                    break
+                  }
+                  if (fwd[pi] === ' ' || fwd[pi] === '\t') break
+                  pi++
+                }
+                if (hasEmbeddedColon) {
+                  // Scan to end of plain scalar token (space, tab, newline, eof).
+                  let end = 0
+                  while (end < fwd.length && fwd[end] !== ' ' && fwd[end] !== '\t' &&
+                         fwd[end] !== '\n' && fwd[end] !== '\r') end++
+                  let text = fwd.substring(0, end)
+                  let tkn = lex.token('#TX', text, text, lex.pnt)
+                  pnt.sI += end
+                  pnt.cI += end
+                  return tkn
+                }
+              }
+
               // YAML element marker: "- " or "-\t" or "-\n" or "-" at end.
               if (fwd[0] === '-' && (fwd[1] === ' ' || fwd[1] === '\t' || fwd[1] === '\n' ||
                   fwd[1] === '\r' || fwd[1] === undefined)) {
@@ -966,20 +1027,15 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               let isFlowColon = false
               if (fwd[0] === ':' && fwd[1] !== ' ' && fwd[1] !== '\t' &&
                   fwd[1] !== '\n' && fwd[1] !== '\r' && fwd[1] !== undefined) {
-                // Check if we're in a flow context.
-                let flowDepth = 0
-                for (let fi = 0; fi < pnt.sI; fi++) {
-                  let fc = lex.src[fi]
-                  if (fc === '{' || fc === '[') flowDepth++
-                  else if (fc === '}' || fc === ']') { if (flowDepth > 0) flowDepth-- }
-                  else if (fc === '"') {
-                    fi++; while (fi < pnt.sI && lex.src[fi] !== '"') { if (lex.src[fi] === '\\') fi++; fi++ }
-                  }
-                  else if (fc === "'") {
-                    fi++; while (fi < pnt.sI && lex.src[fi] !== "'") { if (lex.src[fi] === "'" && lex.src[fi+1] === "'") fi++; fi++ }
-                  }
+                // JSON-compatible flow colon: only when preceded by a quoted string.
+                // e.g. {"key":value} — the char before ':' must be '"' or "'".
+                // Also skip whitespace/newlines (flow context allows multiline).
+                let prevI = pnt.sI - 1
+                while (prevI >= 0 && (lex.src[prevI] === ' ' || lex.src[prevI] === '\t' ||
+                       lex.src[prevI] === '\n' || lex.src[prevI] === '\r')) prevI--
+                if (prevI >= 0 && (lex.src[prevI] === '"' || lex.src[prevI] === "'")) {
+                  isFlowColon = true
                 }
-                if (flowDepth > 0) isFlowColon = true
               }
               if (fwd[0] === ':' && (fwd[1] === ' ' || fwd[1] === '\t' || fwd[1] === '\n' ||
                   fwd[1] === '\r' || fwd[1] === undefined || isFlowColon)) {
