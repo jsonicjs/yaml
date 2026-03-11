@@ -555,6 +555,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 }
                 // Handle document start marker (---).
                 let docMatch = src.match(/^---(?:([ \t]+)(.+))?(\r?\n|$)/)
+                let docStripped = false
                 if (docMatch) {
                   let prefix = docMatch[2] || ''
                   let rest = src.substring(docMatch[0].length)
@@ -565,14 +566,21 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                     // Leave --- in place, just truncate at next document marker.
                   } else if (prefix && trimmed[0] !== '#') {
                     src = prefix + (docMatch[3] || '') + rest
+                    docStripped = true
                   } else {
                     src = rest
+                    docStripped = true
                   }
                 }
                 // Truncate at the next document marker (---, ..., or %YAML/%TAG at column 0).
                 let endMatch = src.match(/^(---|\.\.\.|(%)(?:YAML|TAG)[ \t])(?:[ \t]|$)/m)
                 if (endMatch && endMatch.index !== undefined && endMatch.index > 0) {
                   src = src.substring(0, endMatch.index)
+                }
+                // After stripping first ---, if remaining is just another ---
+                // or ..., the document is empty.
+                if (docStripped && /^(---|\.\.\.)(\s|$)/.test(src)) {
+                  src = ''
                 }
                 lex.src = src
                 lex.pnt.len = src.length
@@ -756,8 +764,25 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   pnt.cI += valEnd
                   return tkn
                 }
-                // Unquoted: stop at `: `, ` #`, newline.
-                while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r') {
+                // If value is on next line (tag followed by newline with
+                // indented content), skip the tag and let the next lex cycle
+                // handle the value. If end-of-source or next line is not
+                // indented content, fall through to produce default value.
+                if ((fwd[valStart] === '\n' || fwd[valStart] === '\r') &&
+                    valStart < fwd.length - 1) {
+                  let nextLineStart = valStart + 1
+                  if (fwd[nextLineStart] === '\n' || fwd[nextLineStart] === ' ') {
+                    // Content on next line — skip tag, let it be parsed.
+                    pnt.sI += valStart + 1
+                    pnt.cI = 0
+                    pnt.rI++
+                    fwd = lex.src.substring(pnt.sI)
+                    continue yamlMatchLoop
+                  }
+                }
+                // Unquoted: stop at `: `, ` #`, newline, flow indicators.
+                while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r' &&
+                       fwd[valEnd] !== ',' && fwd[valEnd] !== '}' && fwd[valEnd] !== ']') {
                   if (fwd[valEnd] === ':' && (fwd[valEnd+1] === ' ' || fwd[valEnd+1] === '\n' ||
                       fwd[valEnd+1] === '\r' || fwd[valEnd+1] === undefined)) break
                   if (fwd[valEnd] === ' ' && fwd[valEnd+1] === '#') break
