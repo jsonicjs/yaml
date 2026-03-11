@@ -360,7 +360,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             if (c === ':' && (fwd[i + 1] === ' ' || fwd[i + 1] === '\t' || fwd[i + 1] === '\n' ||
                 fwd[i + 1] === '\r' || fwd[i + 1] === undefined)) break
             if (c === ' ' && fwd[i + 1] === '#') break
-            if (c === ']' || c === '}') break
+            if (inFlowCtx && (c === ']' || c === '}')) break
             if (c === ',' && inFlowCtx) break
             line += c
             i++
@@ -490,7 +490,10 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               // may not be recorded yet due to lexer pre-fetching.
               if (fwd[0] === '*') {
                 let nameEnd = 1
-                while (nameEnd < fwd.length && /[a-zA-Z0-9_-]/.test(fwd[nameEnd])) nameEnd++
+                while (nameEnd < fwd.length && fwd[nameEnd] !== ' ' && fwd[nameEnd] !== '\t' &&
+                       fwd[nameEnd] !== '\n' && fwd[nameEnd] !== '\r' && fwd[nameEnd] !== ',' &&
+                       fwd[nameEnd] !== '{' && fwd[nameEnd] !== '}' && fwd[nameEnd] !== '[' &&
+                       fwd[nameEnd] !== ']' && fwd[nameEnd] !== ':') nameEnd++
                 let name = fwd.substring(1, nameEnd)
                 let src = fwd.substring(0, nameEnd)
                 // Store the alias name as a special marker object.
@@ -505,7 +508,10 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               // let the value be parsed, and record it post-parse via grammar rules.
               if (fwd[0] === '&') {
                 let nameEnd = 1
-                while (nameEnd < fwd.length && /[a-zA-Z0-9_-]/.test(fwd[nameEnd])) nameEnd++
+                while (nameEnd < fwd.length && fwd[nameEnd] !== ' ' && fwd[nameEnd] !== '\t' &&
+                       fwd[nameEnd] !== '\n' && fwd[nameEnd] !== '\r' && fwd[nameEnd] !== ',' &&
+                       fwd[nameEnd] !== '{' && fwd[nameEnd] !== '}' && fwd[nameEnd] !== '[' &&
+                       fwd[nameEnd] !== ']') nameEnd++
                 let anchorName = fwd.substring(1, nameEnd)
                 let skip = nameEnd
                 if (fwd[skip] === ' ') skip++
@@ -786,7 +792,10 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               // Anchor after ---.
               if (fwd[0] === '&') {
                 let nameEnd = 1
-                while (nameEnd < fwd.length && /[a-zA-Z0-9_-]/.test(fwd[nameEnd])) nameEnd++
+                while (nameEnd < fwd.length && fwd[nameEnd] !== ' ' && fwd[nameEnd] !== '\t' &&
+                       fwd[nameEnd] !== '\n' && fwd[nameEnd] !== '\r' && fwd[nameEnd] !== ',' &&
+                       fwd[nameEnd] !== '{' && fwd[nameEnd] !== '}' && fwd[nameEnd] !== '[' &&
+                       fwd[nameEnd] !== ']') nameEnd++
                 let anchorName = fwd.substring(1, nameEnd)
                 let skip = nameEnd
                 if (fwd[skip] === ' ') skip++
@@ -800,38 +809,40 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               if (fwd[0] === '"') {
                 let i = 1
                 let val = ''
+                let escapedUpTo = 0 // val chars up to this index are from escapes (non-trimmable)
                 while (i < fwd.length && fwd[i] !== '"') {
                   if (fwd[i] === '\\') {
                     i++
                     let esc = fwd[i]
-                    if (esc === 'n') { val += '\n'; i++ }
-                    else if (esc === 't') { val += '\t'; i++ }
-                    else if (esc === 'r') { val += '\r'; i++ }
-                    else if (esc === '"') { val += '"'; i++ }
-                    else if (esc === '\\') { val += '\\'; i++ }
-                    else if (esc === '/') { val += '/'; i++ }
-                    else if (esc === 'b') { val += '\b'; i++ }
-                    else if (esc === 'f') { val += '\f'; i++ }
-                    else if (esc === 'a') { val += '\x07'; i++ }
-                    else if (esc === 'e') { val += '\x1b'; i++ }
-                    else if (esc === 'v') { val += '\v'; i++ }
-                    else if (esc === '0') { val += '\0'; i++ }
-                    else if (esc === ' ') { val += ' '; i++ }
-                    else if (esc === '_') { val += '\u00a0'; i++ }
-                    else if (esc === 'N') { val += '\u0085'; i++ }
-                    else if (esc === 'L') { val += '\u2028'; i++ }
-                    else if (esc === 'P') { val += '\u2029'; i++ }
+                    if (esc === 'n') { val += '\n'; i++; escapedUpTo = val.length }
+                    else if (esc === 't') { val += '\t'; i++; escapedUpTo = val.length }
+                    else if (esc === 'r') { val += '\r'; i++; escapedUpTo = val.length }
+                    else if (esc === '"') { val += '"'; i++; escapedUpTo = val.length }
+                    else if (esc === '\\') { val += '\\'; i++; escapedUpTo = val.length }
+                    else if (esc === '/') { val += '/'; i++; escapedUpTo = val.length }
+                    else if (esc === 'b') { val += '\b'; i++; escapedUpTo = val.length }
+                    else if (esc === 'f') { val += '\f'; i++; escapedUpTo = val.length }
+                    else if (esc === 'a') { val += '\x07'; i++; escapedUpTo = val.length }
+                    else if (esc === 'e') { val += '\x1b'; i++; escapedUpTo = val.length }
+                    else if (esc === 'v') { val += '\v'; i++; escapedUpTo = val.length }
+                    else if (esc === '0') { val += '\0'; i++; escapedUpTo = val.length }
+                    else if (esc === '\t') { val += '\t'; i++; escapedUpTo = val.length }
+                    else if (esc === ' ') { val += ' '; i++; escapedUpTo = val.length }
+                    else if (esc === '_') { val += '\u00a0'; i++; escapedUpTo = val.length }
+                    else if (esc === 'N') { val += '\u0085'; i++; escapedUpTo = val.length }
+                    else if (esc === 'L') { val += '\u2028'; i++; escapedUpTo = val.length }
+                    else if (esc === 'P') { val += '\u2029'; i++; escapedUpTo = val.length }
                     else if (esc === 'x') {
                       val += String.fromCharCode(parseInt(fwd.substring(i+1, i+3), 16))
-                      i += 3
+                      i += 3; escapedUpTo = val.length
                     }
                     else if (esc === 'u') {
                       val += String.fromCharCode(parseInt(fwd.substring(i+1, i+5), 16))
-                      i += 5
+                      i += 5; escapedUpTo = val.length
                     }
                     else if (esc === 'U') {
                       val += String.fromCodePoint(parseInt(fwd.substring(i+1, i+9), 16))
-                      i += 9
+                      i += 9; escapedUpTo = val.length
                     }
                     else if (esc === '\n' || esc === '\r') {
                       // Escaped newline: line continuation (join directly).
@@ -842,8 +853,11 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                     }
                     else { val += esc; i++ }
                   } else if (fwd[i] === '\n' || fwd[i] === '\r') {
-                    // Flow scalar line folding (same as single-quoted).
-                    val = val.replace(/[ \t]+$/, '')
+                    // Flow scalar line folding for double-quoted strings.
+                    // Only trim trailing whitespace that was NOT from escape sequences.
+                    let trimTo = val.length
+                    while (trimTo > escapedUpTo && (val[trimTo - 1] === ' ' || val[trimTo - 1] === '\t')) trimTo--
+                    val = val.substring(0, trimTo)
                     let emptyLines = 0
                     while (i < fwd.length && (fwd[i] === '\n' || fwd[i] === '\r')) {
                       if (fwd[i] === '\r') i++
