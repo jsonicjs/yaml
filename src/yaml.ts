@@ -351,7 +351,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           while (i < fwd.length) {
             let c = fwd[i]
             if (c === '\n' || c === '\r') break
-            if (c === ':' && (fwd[i + 1] === ' ' || fwd[i + 1] === '\n' ||
+            if (c === ':' && (fwd[i + 1] === ' ' || fwd[i + 1] === '\t' || fwd[i + 1] === '\n' ||
                 fwd[i + 1] === '\r' || fwd[i + 1] === undefined)) break
             if (c === ' ' && fwd[i + 1] === '#') break
             if (c === ']' || c === '}') break
@@ -372,24 +372,34 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           if (fwd[i] === '\n') i++
           // Count indent of next line.
           let lineIndent = 0
-          while (i < fwd.length && fwd[i] === ' ') { lineIndent++; i++ }
-          // If more indented than the key, this is a continuation line.
-          // But NOT if the line contains `: ` (which makes it a key-value pair).
-          if (lineIndent > keyIndent && i < fwd.length &&
-              fwd[i] !== '\n' && fwd[i] !== '\r' && fwd[i] !== '#' &&
-              fwd[i] !== '-') {
+          while (i < fwd.length && (fwd[i] === ' ' || fwd[i] === '\t')) { lineIndent++; i++ }
+          // In flow context, continuation is allowed regardless of indent
+          // (as long as the next line doesn't start a flow indicator or comment).
+          // In block context, must be more indented than the key.
+          let canContinue = inFlowCtx
+            ? (i < fwd.length && fwd[i] !== '\n' && fwd[i] !== '\r' &&
+               fwd[i] !== '#' && fwd[i] !== '{' && fwd[i] !== '}' &&
+               fwd[i] !== '[' && fwd[i] !== ']')
+            : (lineIndent > keyIndent && i < fwd.length &&
+               fwd[i] !== '\n' && fwd[i] !== '\r' && fwd[i] !== '#' &&
+               fwd[i] !== '-')
+          if (canContinue) {
             // Check if this line is a key-value pair (contains ": ").
             let peekJ = i
             let isKV = false
             while (peekJ < fwd.length && fwd[peekJ] !== '\n' && fwd[peekJ] !== '\r') {
-              if (fwd[peekJ] === ':' && (fwd[peekJ + 1] === ' ' || fwd[peekJ + 1] === '\n' ||
-                  fwd[peekJ + 1] === '\r' || fwd[peekJ + 1] === undefined)) {
+              if (fwd[peekJ] === ':' && (fwd[peekJ + 1] === ' ' || fwd[peekJ + 1] === '\t' ||
+                  fwd[peekJ + 1] === '\n' || fwd[peekJ + 1] === '\r' ||
+                  fwd[peekJ + 1] === undefined)) {
                 isKV = true
+                break
+              }
+              if (fwd[peekJ] === '}' || fwd[peekJ] === ']' || fwd[peekJ] === ',') {
                 break
               }
               peekJ++
             }
-            if (!isKV) {
+            if (!isKV || inFlowCtx) {
               let contLine = scanLine()
               if (contLine.length > 0) {
                 text += ' ' + contLine
@@ -465,6 +475,9 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             return function yamlMatcher(lex: Lex) {
               let pnt = lex.pnt
               let fwd = lex.src.substring(pnt.sI)
+
+              // Loop to restart matching after consuming flow whitespace.
+              yamlMatchLoop: while (true) {
 
               // YAML alias: *name — emit a VL token with alias name.
               // Resolution happens at grammar time (val.ac) since the anchor
@@ -899,26 +912,26 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 return tkn
               }
 
-              // YAML element marker: "- " or "-\n" or "-" at end.
-              if (fwd[0] === '-' && (fwd[1] === ' ' || fwd[1] === '\n' ||
+              // YAML element marker: "- " or "-\t" or "-\n" or "-" at end.
+              if (fwd[0] === '-' && (fwd[1] === ' ' || fwd[1] === '\t' || fwd[1] === '\n' ||
                   fwd[1] === '\r' || fwd[1] === undefined)) {
                 let tkn = lex.token('#EL', undefined, '- ', lex.pnt)
                 pnt.sI += 1
                 pnt.cI += 1
-                // Consume the space after dash if present.
-                if (fwd[1] === ' ') {
+                // Consume the space/tab after dash if present.
+                if (fwd[1] === ' ' || fwd[1] === '\t') {
                   pnt.sI += 1
                   pnt.cI += 1
                 }
                 return tkn
               }
 
-              // Yaml colons are ': ', ':<newline>', or ':' at end of input.
-              if (fwd[0] === ':' && (fwd[1] === ' ' || fwd[1] === '\n' ||
+              // Yaml colons are ': ', ':\t', ':<newline>', or ':' at end of input.
+              if (fwd[0] === ':' && (fwd[1] === ' ' || fwd[1] === '\t' || fwd[1] === '\n' ||
                   fwd[1] === '\r' || fwd[1] === undefined)) {
                 let tkn = lex.token('#CL', 1, ': ', lex.pnt)
                 pnt.sI += 1
-                if (fwd[1] === ' ') {
+                if (fwd[1] === ' ' || fwd[1] === '\t') {
                   pnt.cI += 2
                 } else if (fwd[1] === '\n' || fwd[1] === '\r') {
                   // Don't consume newline — leave for #IN.
@@ -966,7 +979,9 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   }
                   pnt.sI += pos
                   pnt.cI = 0
-                  return undefined
+                  // Re-run yamlMatcher from new position.
+                  fwd = lex.src.substring(pnt.sI)
+                  continue yamlMatchLoop
                 }
               }
               // Must catch all newlines before the default line/space matchers.
@@ -1018,6 +1033,9 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 pnt.cI = spaces + 1
                 return tkn
               }
+
+              break // End of yamlMatchLoop
+              } // end while(true) yamlMatchLoop
             }
           }
         }
@@ -1145,14 +1163,14 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
   })
 
 
-  // Amend list rule: close on dedent.
+  // Amend list rule: close on dedent or same-indent non-element.
   jsonic.rule('list', (rulespec: RuleSpec) => {
     rulespec.close([
-      // Dedent: close this list.
+      // Same or lesser indent: close this list.
       {
         s: [IN],
         c: (rule: Rule, ctx: Context) => {
-          return ctx.t0.val < rule.n.in
+          return ctx.t0.val <= rule.n.in
         },
         b: 1,
       },
@@ -1347,6 +1365,15 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           return ctx.t0.val === rule.n.in
         },
         r: 'elem',
+      },
+
+      // Same indent but no element marker: close list (e.g. map key follows).
+      {
+        s: [IN],
+        c: (rule: Rule, ctx: Context) => {
+          return ctx.t0.val === rule.n.in
+        },
+        b: 1,
       },
 
       // Dedent: close this list.
