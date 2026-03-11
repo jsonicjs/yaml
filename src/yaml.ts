@@ -47,7 +47,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
     // Remove single quote from string chars — YAML single-quoted strings
     // don't process backslash escapes, so we handle them in yamlMatcher.
     string: {
-      chars: '"`',
+      chars: '`',
     },
 
     // Custom text check: consume to end of line (including spaces)
@@ -775,6 +775,79 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 pnt.cI += skip
                 pendingAnchors.push(anchorName)
                 fwd = lex.src.substring(pnt.sI)
+              }
+
+              // YAML double-quoted string: backslash escapes + multiline folding.
+              if (fwd[0] === '"') {
+                let i = 1
+                let val = ''
+                while (i < fwd.length && fwd[i] !== '"') {
+                  if (fwd[i] === '\\') {
+                    i++
+                    let esc = fwd[i]
+                    if (esc === 'n') { val += '\n'; i++ }
+                    else if (esc === 't') { val += '\t'; i++ }
+                    else if (esc === 'r') { val += '\r'; i++ }
+                    else if (esc === '"') { val += '"'; i++ }
+                    else if (esc === '\\') { val += '\\'; i++ }
+                    else if (esc === '/') { val += '/'; i++ }
+                    else if (esc === 'b') { val += '\b'; i++ }
+                    else if (esc === 'f') { val += '\f'; i++ }
+                    else if (esc === 'a') { val += '\x07'; i++ }
+                    else if (esc === 'e') { val += '\x1b'; i++ }
+                    else if (esc === 'v') { val += '\v'; i++ }
+                    else if (esc === '0') { val += '\0'; i++ }
+                    else if (esc === ' ') { val += ' '; i++ }
+                    else if (esc === '_') { val += '\u00a0'; i++ }
+                    else if (esc === 'N') { val += '\u0085'; i++ }
+                    else if (esc === 'L') { val += '\u2028'; i++ }
+                    else if (esc === 'P') { val += '\u2029'; i++ }
+                    else if (esc === 'x') {
+                      val += String.fromCharCode(parseInt(fwd.substring(i+1, i+3), 16))
+                      i += 3
+                    }
+                    else if (esc === 'u') {
+                      val += String.fromCharCode(parseInt(fwd.substring(i+1, i+5), 16))
+                      i += 5
+                    }
+                    else if (esc === 'U') {
+                      val += String.fromCodePoint(parseInt(fwd.substring(i+1, i+9), 16))
+                      i += 9
+                    }
+                    else if (esc === '\n' || esc === '\r') {
+                      // Escaped newline: line continuation (join directly).
+                      if (esc === '\r' && fwd[i+1] === '\n') i++
+                      i++
+                      // Skip leading whitespace on next line.
+                      while (i < fwd.length && (fwd[i] === ' ' || fwd[i] === '\t')) i++
+                    }
+                    else { val += esc; i++ }
+                  } else if (fwd[i] === '\n' || fwd[i] === '\r') {
+                    // Flow scalar line folding (same as single-quoted).
+                    val = val.replace(/[ \t]+$/, '')
+                    let emptyLines = 0
+                    while (i < fwd.length && (fwd[i] === '\n' || fwd[i] === '\r')) {
+                      if (fwd[i] === '\r') i++
+                      if (fwd[i] === '\n') i++
+                      emptyLines++
+                      while (i < fwd.length && (fwd[i] === ' ' || fwd[i] === '\t')) i++
+                    }
+                    if (emptyLines > 1) {
+                      for (let e = 1; e < emptyLines; e++) val += '\n'
+                    } else {
+                      val += ' '
+                    }
+                  } else {
+                    val += fwd[i]
+                    i++
+                  }
+                }
+                if (fwd[i] === '"') i++
+                let src = fwd.substring(0, i)
+                let tkn = lex.token('#ST', val, src, lex.pnt)
+                pnt.sI += i
+                pnt.cI += i
+                return tkn
               }
 
               // YAML single-quoted string: no backslash escape processing.
