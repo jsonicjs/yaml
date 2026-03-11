@@ -30,7 +30,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
 
   // Shared anchor storage for the plugin instance.
   let anchors: Record<string, any> = {}
-  let pendingAnchors: string[] = []
+  let pendingAnchors: { name: string, inline: boolean }[] = []
   let pendingExplicitCL = false
   // Queue for tokens that need to be emitted across multiple lex calls.
   let pendingTokens: any[] = []
@@ -846,8 +846,55 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 }
                 pnt.sI += skip
                 pnt.cI += skip
-                // Push pending anchor name.
-                pendingAnchors.push(anchorName)
+                // Determine if anchor is inline (content follows on same line)
+                // or standalone (only newline follows).
+                let anchorInline = !(isStandalone &&
+                    (lex.src[pnt.sI] === '\r' || lex.src[pnt.sI] === '\n' ||
+                     pnt.sI >= lex.src.length))
+                // For inline anchors before scalar values, record the anchor
+                // immediately so aliases in later pairs can resolve them.
+                if (anchorInline) {
+                  let peek = lex.src.substring(pnt.sI)
+                  let pch = peek[0]
+                  if (pch !== '[' && pch !== '{' && pch !== '>' && pch !== '|' &&
+                      pch !== '\n' && pch !== '\r' && pch !== undefined) {
+                    let scalarVal: string | undefined
+                    if (pch === '"') {
+                      let ei = 1
+                      while (ei < peek.length && peek[ei] !== '"') {
+                        if (peek[ei] === '\\') ei++
+                        ei++
+                      }
+                      scalarVal = peek.substring(1, ei)
+                        .replace(/\\n/g, '\n').replace(/\\t/g, '\t')
+                        .replace(/\\\\/g, '\\').replace(/\\"/g, '"')
+                    } else if (pch === "'") {
+                      let ei = 1
+                      while (ei < peek.length && peek[ei] !== "'") {
+                        if (peek[ei] === "'" && peek[ei+1] === "'") ei++
+                        ei++
+                      }
+                      scalarVal = peek.substring(1, ei).replace(/''/g, "'")
+                    } else {
+                      let ei = 0
+                      while (ei < peek.length && peek[ei] !== '\n' && peek[ei] !== '\r' &&
+                             peek[ei] !== ',' && peek[ei] !== '}' && peek[ei] !== ']') {
+                        if (peek[ei] === ':' && (peek[ei+1] === ' ' || peek[ei+1] === '\t' ||
+                            peek[ei+1] === '\n' || peek[ei+1] === '\r' ||
+                            peek[ei+1] === undefined)) break
+                        if (peek[ei] === ' ' && peek[ei+1] === '#') break
+                        ei++
+                      }
+                      let raw = peek.substring(0, ei).trim()
+                      if (raw.length > 0) scalarVal = raw
+                    }
+                    if (scalarVal !== undefined) {
+                      anchors[anchorName] = scalarVal
+                    }
+                  }
+                }
+                // Push pending anchor with inline flag.
+                pendingAnchors.push({ name: anchorName, inline: anchorInline })
                 // If anchor is standalone on its own line (followed by newline),
                 // consume the newline and leading spaces so no extra IN token
                 // is emitted. Only consume when next line indent >= anchor indent,
@@ -983,10 +1030,14 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 let valStart = tagEnd
                 if (fwd[valStart] === ' ') valStart++
                 let valEnd = valStart
-                // Skip anchor (&name) if present before value.
+                // Skip and record anchor (&name) if present before value.
+                let tagAnchorName = ''
                 if (fwd[valStart] === '&') {
                   let anchorEnd = valStart + 1
-                  while (anchorEnd < fwd.length && fwd[anchorEnd] !== ' ' && fwd[anchorEnd] !== '\n') anchorEnd++
+                  while (anchorEnd < fwd.length && fwd[anchorEnd] !== ' ' &&
+                         fwd[anchorEnd] !== '\n' && fwd[anchorEnd] !== '\r') anchorEnd++
+                  tagAnchorName = fwd.substring(valStart + 1, anchorEnd)
+                  pendingAnchors.push({ name: tagAnchorName, inline: true })
                   if (fwd[anchorEnd] === ' ') anchorEnd++
                   valStart = anchorEnd
                   valEnd = valStart
@@ -1006,6 +1057,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   else if (tag === 'float') result = parseFloat(rawVal)
                   else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
                   else if (tag === 'null') result = null
+                  if (tagAnchorName) anchors[tagAnchorName] = result
                   let tknTin = typeof result === 'string' ? '#TX' :
                                typeof result === 'number' ? '#NR' : '#VL'
                   let tkn = lex.token(tknTin, result, fwd.substring(0, valEnd), lex.pnt)
@@ -1045,6 +1097,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 else if (tag === 'float') result = parseFloat(rawVal)
                 else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
                 else if (tag === 'null') result = null
+                if (tagAnchorName) anchors[tagAnchorName] = result
                 // Use #ST for empty strings (jsonic handles #ST better than
                 // empty #TX in flow context), #NR for numbers, #VL for null.
                 let tknTin = (typeof result === 'string' && result === '') ? '#ST' :
@@ -1296,7 +1349,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 if (fwd[skip] === ' ') skip++
                 pnt.sI += skip
                 pnt.cI += skip
-                pendingAnchors.push(anchorName)
+                pendingAnchors.push({ name: anchorName, inline: true })
                 fwd = lex.src.substring(pnt.sI)
               }
 
@@ -1593,7 +1646,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                            (fwd[afterAnchor] === ' ' || fwd[afterAnchor] === '\t')) afterAnchor++
                     if (afterAnchor >= fwd.length || fwd[afterAnchor] === '\n' ||
                         fwd[afterAnchor] === '\r' || fwd[afterAnchor] === '#') {
-                      pendingAnchors.push(fwd.substring(pos + 1, ae))
+                      pendingAnchors.push({ name: fwd.substring(pos + 1, ae), inline: false })
                       // Skip to end of line (including any comment).
                       while (afterAnchor < fwd.length &&
                              fwd[afterAnchor] !== '\n' && fwd[afterAnchor] !== '\r') afterAnchor++
@@ -1703,7 +1756,10 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
     // Claim pending anchors after first token is processed.
     rulespec.ao((rule: Rule) => {
       if (pendingAnchors.length > 0) {
-        rule.u.yamlAnchorNames = [...pendingAnchors]
+        rule.u.yamlAnchors = [...pendingAnchors]
+        rule.u.yamlAnchorOpenNode = rule.node
+        // Note: rule.node is undefined at ao time, so we can't record
+        // anchor values here. Recording happens in ac.
         pendingAnchors.length = 0
       }
     })
@@ -1735,13 +1791,21 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
       }
 
       // Record anchors only if this val claimed them.
-      if (rule.u.yamlAnchorNames) {
-        for (let name of rule.u.yamlAnchorNames) {
+      if (rule.u.yamlAnchors) {
+        for (let anchor of rule.u.yamlAnchors) {
+          // For inline anchors that were recorded at open time with a
+          // scalar value, don't overwrite with the final compound value.
+          if (anchor.inline &&
+              rule.u.yamlAnchorOpenNode != null &&
+              typeof rule.u.yamlAnchorOpenNode !== 'object' &&
+              typeof rule.node === 'object' && rule.node !== null) {
+            continue
+          }
           let val = rule.node
           if (typeof val === 'object' && val !== null) {
             val = JSON.parse(JSON.stringify(val))
           }
-          anchors[name] = val
+          anchors[anchor.name] = val
         }
       }
     })
