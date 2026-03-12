@@ -26,5 +26,31 @@ test/coverage.html
 coverage
 
 package-lock.json
+yarn.lock
 
+dist
+dist-test
 
+# Temporary test/debug scripts
+categorize.js
+check_all.js
+check_mismatches.js
+check_out.txt
+check_parse_errors.js
+find_passing.js
+find_tags.js
+gen_skip.js
+now_failing.txt
+still_failing.txt
+test_9mma.js
+test_9mma2.js
+test_9mma3.js
+test_cases.js
+test_pp4.js
+test_pp5.js
+test_preprocess.js
+test_preprocess2.js
+test_preprocess3.js
+test_preprocess_debug.js
+test_specific.js
+update_skip.js

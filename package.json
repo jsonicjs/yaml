@@ -1,55 +1,46 @@
 {
-  "name": "@jsonic/variant-yaml",
-  "version": "0.0.1",
-  "description": "This plugin allows the [Jsonic](https://jsonic.senecajs.org) JSON parser to support a core subset of yaml syntax.",
-  "main": "yaml.js",
+  "name": "@jsonic/yaml",
+  "version": "0.1.0",
+  "description": "This plugin allows the [Jsonic](https://jsonic.senecajs.org) JSON parser to support a core subset of YAML syntax.",
+  "main": "dist/yaml.js",
   "type": "commonjs",
-  "browser": "yaml.min.js",
-  "types": "yaml.d.ts",
-  "homepage": "https://github.com/jsonicjs/variant-yaml",
+  "types": "dist/yaml.d.ts",
+  "homepage": "https://github.com/jsonicjs/yaml",
   "keywords": [
-    "pattern",
-    "matcher",
-    "object",
-    "property",
-    "json"
+    "json",
+    "jsonic",
+    "yaml",
+    "parser"
   ],
   "author": "Richard Rodger (http://richardrodger.com)",
   "repository": {
     "type": "git",
-    "url": "git://github.com/jsonicjs/variant-yaml.git"
+    "url": "git://github.com/jsonicjs/yaml.git"
   },
   "scripts": {
-    "test": "jest --coverage",
-    "test-some": "jest -t",
-    "test-watch": "jest --coverage --watchAll",
-    "watch": "tsc -w -d",
-    "build": "tsc -d && cp variant-yaml.js variant-yaml.min.js && browserify -o variant-yaml.min.js -e variant-yaml.js -s @JsonicVariantYaml -im -i assert -p tinyify",
-    "prettier": "prettier --write --no-semi --single-quote *.ts test/*.js",
-    "clean": "rm -rf node_modules yarn.lock package-lock.json",
-    "reset": "npm run clean && npm i && npm test",
+    "test": "node --enable-source-maps --test \"dist-test/*.test.js\"",
+    "test-some": "node --enable-source-maps --test-name-pattern=\"$npm_config_pattern\" --test \"dist-test/*.test.js\"",
+    "watch": "tsc --build src test -w",
+    "build": "tsc --build src test",
+    "clean": "rm -rf dist dist-test node_modules yarn.lock package-lock.json",
+    "reset": "npm run clean && npm i && npm run build && npm test",
     "repo-tag": "REPO_VERSION=`node -e \"console.log(require('./package').version)\"` && echo TAG: v$REPO_VERSION && git commit -a -m v$REPO_VERSION && git push && git tag v$REPO_VERSION && git push --tags;",
     "repo-publish": "npm run clean && npm i && npm run repo-publish-quick",
-    "repo-publish-quick": "npm run prettier && npm run build && npm run test && npm run test-web && npm run repo-tag && npm publish --registry http://registry.npmjs.org "
+    "repo-publish-quick": "npm run build && npm run test && npm run repo-tag && npm publish --access public --registry https://registry.npmjs.org "
   },
   "license": "MIT",
   "files": [
-    "*.ts",
-    "*.js",
-    "*.map",
+    "src",
+    "dist",
     "LICENSE"
   ],
   "devDependencies": {
-    "@types/jest": "^27.0.1",
-    "browserify": "^17.0.0",
-    "esbuild": "^0.12.26",
-    "esbuild-jest": "^0.5.0",
-    "jest": "^27.1.1",
-    "jsonic": "github:jsonicjs/jsonic#nextgen",
-    "prettier": "^2.4.0",
-    "tinyify": "^3.0.0",
-    "ts-jest": "^27.0.5",
-    "typescript": "^4.4.2"
+    "@hapi/code": "^9.0.3",
+    "@types/node": "^24.9.1",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "jsonic": ">=2"
   },
   "dependencies": {}
 }
