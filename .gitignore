@@ -54,3 +54,6 @@ test_preprocess3.js
 test_preprocess_debug.js
 test_specific.js
 update_skip.js
+
+# Unrelated local directories
+csv/
