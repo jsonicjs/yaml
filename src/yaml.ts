@@ -1309,7 +1309,8 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 if (hasValue) {
                   pnt.sI += valConsumed
                   pnt.rI++
-                  pnt.cI = 1
+                  // Set column to actual position after `: ` on the value line (1-indexed).
+                  pnt.cI = valConsumed - consumed + 1
                   // Has `: value` — emit KEY now, CL on next call.
                   pendingExplicitCL = true
                 } else {

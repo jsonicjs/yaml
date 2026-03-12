@@ -30,7 +30,6 @@ const SKIP: Record<string, string> = {
   '5WE3': 'parse error',
   '8KB6': 'parse error',
   '9BXH': 'parse error',
-  'A2M4': 'output mismatch',
   'CT4Q': 'parse error',
   'JTV5': 'parse error',
   'K3WX': 'parse error',
