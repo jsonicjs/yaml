@@ -792,7 +792,13 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 while (nameEnd < fwd.length && fwd[nameEnd] !== ' ' && fwd[nameEnd] !== '\t' &&
                        fwd[nameEnd] !== '\n' && fwd[nameEnd] !== '\r' && fwd[nameEnd] !== ',' &&
                        fwd[nameEnd] !== '{' && fwd[nameEnd] !== '}' && fwd[nameEnd] !== '[' &&
-                       fwd[nameEnd] !== ']' && fwd[nameEnd] !== ':') nameEnd++
+                       fwd[nameEnd] !== ']') {
+                  // Colon terminates only when followed by space/tab (key-value separator).
+                  // Otherwise colon is a valid anchor-name character per YAML spec.
+                  if (fwd[nameEnd] === ':' &&
+                      (fwd[nameEnd+1] === ' ' || fwd[nameEnd+1] === '\t')) break
+                  nameEnd++
+                }
                 let name = fwd.substring(1, nameEnd)
                 let src = fwd.substring(0, nameEnd)
                 // Check if this alias is used as a map key (followed by ` :` or `:`).
@@ -810,9 +816,22 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   pnt.cI += nameEnd
                   return tkn
                 }
-                // Store the alias name as a special marker object.
-                let marker = { __yamlAlias: name }
-                let tkn = lex.token('#VL', marker, src, lex.pnt)
+                // Resolve alias immediately if anchor exists, since deferred
+                // markers can be lost through Jsonic's rule processing.
+                let tkn: any
+                if (anchors[name] !== undefined) {
+                  let val = anchors[name]
+                  if (typeof val === 'object' && val !== null) {
+                    val = JSON.parse(JSON.stringify(val))
+                  }
+                  let tin = typeof val === 'string' ? '#TX' :
+                            typeof val === 'number' ? '#NR' : '#VL'
+                  tkn = lex.token(tin, val, src, lex.pnt)
+                } else {
+                  // Anchor not yet seen — store marker for deferred resolution.
+                  let marker = { __yamlAlias: name }
+                  tkn = lex.token('#VL', marker, src, lex.pnt)
+                }
                 pnt.sI += nameEnd
                 pnt.cI += nameEnd
                 return tkn
