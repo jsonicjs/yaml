@@ -133,43 +133,62 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             // indent of the containing block (e.g., the mapping key), which
             // may differ from the line's leading spaces (e.g., after "- ").
             if (explicitIndent > 0) {
-              // Find the column of the colon that precedes the block indicator.
-              // The key's indent level is the number of spaces before the key
-              // on this line, which accounts for "- " prefixes.
+              // Find the line containing the block indicator.
               let li = pnt.sI - 1
               while (li > 0 && lex.src[li - 1] !== '\n' && lex.src[li - 1] !== '\r') li--
               // li is now at the start of the line. Find the colon position.
               let keyCol = containingIndent
+              // Check if there's a colon on the SAME line as the block indicator.
+              let hasColonOnLine = false
               for (let ci = li + containingIndent; ci < pnt.sI; ci++) {
                 if (lex.src[ci] === ':' && (lex.src[ci+1] === ' ' || lex.src[ci+1] === '\t')) {
-                  // Key indent is the column of the first non-space after the
-                  // sequence indicators. For "- aaa:", keyCol is 2 (after "- ").
-                  // For "  aaa:", keyCol is 2 (leading spaces).
+                  hasColonOnLine = true
                   break
                 }
               }
-              // Check for sequence indicators: each "- " adds to the effective indent.
-              // But only when the block scalar is a value inside a mapping within
-              // the sequence (e.g., "- key: |2"), not when it's a direct value
-              // (e.g., "- |1"). Detect by checking for ": " between "- " and the
-              // block indicator.
-              let scanI = li + containingIndent
-              let hasColon = false
-              for (let ci = scanI; ci < pnt.sI; ci++) {
-                if (lex.src[ci] === ':' && (lex.src[ci+1] === ' ' || lex.src[ci+1] === '\t')) {
-                  hasColon = true
-                  break
-                }
-              }
-              if (hasColon) {
+              if (hasColonOnLine) {
+                // Block indicator on same line as colon (e.g., "key: |2").
+                // Check for sequence indicators: each "- " adds to the effective indent.
+                let scanI = li + containingIndent
                 while (scanI < pnt.sI && lex.src[scanI] === '-' &&
                        (lex.src[scanI+1] === ' ' || lex.src[scanI+1] === '\t')) {
                   keyCol += 2
                   scanI += 2
                   while (scanI < pnt.sI && lex.src[scanI] === ' ') { keyCol++; scanI++ }
                 }
+                blockIndent = keyCol + explicitIndent
+              } else {
+                // Block indicator on its own line (e.g., after a tag on
+                // a separate line). Look backward to find the parent
+                // mapping key's indent by scanning previous lines for
+                // the colon that started this value context.
+                let parentIndent = 0
+                let searchI = li - 1
+                while (searchI > 0) {
+                  // Find start of previous line.
+                  if (lex.src[searchI] === '\n') searchI--
+                  if (lex.src[searchI] === '\r') searchI--
+                  let prevLineEnd = searchI + 1
+                  while (searchI > 0 && lex.src[searchI - 1] !== '\n' && lex.src[searchI - 1] !== '\r') searchI--
+                  let prevLineStart = searchI
+                  // Check if this line has a colon (mapping key).
+                  for (let ci = prevLineStart; ci < prevLineEnd; ci++) {
+                    if (lex.src[ci] === ':' && (lex.src[ci+1] === ' ' || lex.src[ci+1] === '\t' ||
+                        lex.src[ci+1] === '\n' || lex.src[ci+1] === '\r' || ci+1 >= prevLineEnd)) {
+                      // Found the parent key line. Get its indent.
+                      parentIndent = 0
+                      let pi = prevLineStart
+                      while (pi < prevLineEnd && lex.src[pi] === ' ') { parentIndent++; pi++ }
+                      break
+                    }
+                  }
+                  break  // Only check the immediately preceding non-blank line.
+                }
+                blockIndent = parentIndent + explicitIndent
+                // Update containingIndent to parent's indent so the
+                // "blockIndent <= containingIndent" check below works.
+                containingIndent = parentIndent
               }
-              blockIndent = keyCol + explicitIndent
             }
             if (blockIndent <= containingIndent && !isDocStart && idx < fwd.length) {
               // Content is not indented enough — empty block scalar.
@@ -996,6 +1015,33 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 if (fwd[tagEnd] === ' ') tagEnd++ // skip space after tag
                 pnt.sI += tagEnd
                 pnt.cI += tagEnd
+                // If tag is standalone (followed by newline), consume the
+                // newline and leading spaces so no extra #IN is emitted.
+                if (pnt.sI < lex.src.length &&
+                    (lex.src[pnt.sI] === '\n' || lex.src[pnt.sI] === '\r')) {
+                  // Check if tag is standalone on its line.
+                  let tagStandalone = true
+                  let tagLineIndent = 0
+                  let bi = pnt.sI - tagEnd - 1
+                  while (bi >= 0 && lex.src[bi] !== '\n' && lex.src[bi] !== '\r') {
+                    if (lex.src[bi] !== ' ' && lex.src[bi] !== '\t') {
+                      tagStandalone = false
+                      break
+                    }
+                    tagLineIndent++
+                    bi--
+                  }
+                  if (tagStandalone) {
+                    let nl = pnt.sI
+                    if (lex.src[nl] === '\r') nl++
+                    if (lex.src[nl] === '\n') nl++
+                    let spaces = 0
+                    while (nl + spaces < lex.src.length && lex.src[nl + spaces] === ' ') spaces++
+                    pnt.sI = nl + spaces
+                    pnt.cI = spaces
+                    pnt.rI++
+                  }
+                }
                 fwd = lex.src.substring(pnt.sI)
                 // Restart matching to parse the value.
                 continue yamlMatchLoop
