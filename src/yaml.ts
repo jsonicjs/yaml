@@ -487,7 +487,9 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         }
 
         // The minimum indent for continuation lines.
-        let minContinuationIndent = isMapValue ? keyIndent + 1 : currentLineIndent
+        // For map values, continuation indent is based on the colon's line indent,
+        // not the previous line's indent (which may be a key continuation line).
+        let minContinuationIndent = isMapValue ? currentLineIndent + 1 : currentLineIndent
         let text = ''
         let i = 0
         let totalConsumed = 0
@@ -1253,7 +1255,61 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   while (li > 0 && lex.src[li-1] !== '\n' && lex.src[li-1] !== '\r') li--
                   while (li < pnt.sI && lex.src[li] === ' ') { qIndent++; li++ }
                 }
-                // Scan continuation lines for key.
+                // Count extra rows consumed (for multiline keys).
+                let extraRows = 0
+
+                // Handle block scalar keys (| or >).
+                let blockScalarMatch = key.match(/^([|>])([+-]?)([0-9]?)$/)
+                if (blockScalarMatch) {
+                  let isFolded = blockScalarMatch[1] === '>'
+                  let chomp = blockScalarMatch[2] || ''
+                  let explicitIndent = blockScalarMatch[3] ? parseInt(blockScalarMatch[3]) : 0
+                  // Collect block scalar content lines.
+                  let blockLines: string[] = []
+                  let contentIndent = 0
+                  while (consumed < fwd.length) {
+                    let lineIndent = 0
+                    while (consumed + lineIndent < fwd.length && fwd[consumed + lineIndent] === ' ') lineIndent++
+                    let afterSpaces = consumed + lineIndent
+                    // Empty line or line with only spaces.
+                    if (afterSpaces >= fwd.length || fwd[afterSpaces] === '\n' || fwd[afterSpaces] === '\r') {
+                      blockLines.push('')
+                      consumed = afterSpaces
+                      if (consumed < fwd.length && fwd[consumed] === '\r') consumed++
+                      if (consumed < fwd.length && fwd[consumed] === '\n') consumed++
+                      extraRows++
+                      continue
+                    }
+                    // Determine content indent from first non-empty line.
+                    if (contentIndent === 0) {
+                      contentIndent = explicitIndent > 0 ? qIndent + explicitIndent : lineIndent
+                    }
+                    // Line must be indented more than ? to be content.
+                    if (lineIndent < contentIndent) break
+                    // Collect line content.
+                    let lineEnd = afterSpaces
+                    while (lineEnd < fwd.length && fwd[lineEnd] !== '\n' && fwd[lineEnd] !== '\r') lineEnd++
+                    blockLines.push(fwd.substring(consumed + contentIndent, lineEnd))
+                    consumed = lineEnd
+                    if (consumed < fwd.length && fwd[consumed] === '\r') consumed++
+                    if (consumed < fwd.length && fwd[consumed] === '\n') consumed++
+                    extraRows++
+                  }
+                  // Apply chomping.
+                  // Remove trailing empty lines for non-keep.
+                  if (chomp !== '+') {
+                    while (blockLines.length > 0 && blockLines[blockLines.length - 1] === '') blockLines.pop()
+                  }
+                  if (isFolded) {
+                    key = blockLines.join(' ') + '\n'
+                  } else {
+                    key = blockLines.join('\n') + '\n'
+                  }
+                  if (chomp === '-') {
+                    key = key.replace(/\n$/, '')
+                  }
+                } else {
+                // Scan continuation lines for key (plain scalar multiline).
                 while (consumed < fwd.length) {
                   // Skip comment lines.
                   let lineIndent = 0
@@ -1265,6 +1321,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                     beforeNewline = afterSpaces
                     if (afterSpaces < fwd.length && fwd[afterSpaces] === '\r') afterSpaces++
                     if (afterSpaces < fwd.length && fwd[afterSpaces] === '\n') afterSpaces++
+                    extraRows++
                     consumed = afterSpaces
                     continue
                   }
@@ -1285,9 +1342,11 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                     beforeNewline = consumed
                     if (consumed < fwd.length && fwd[consumed] === '\r') consumed++
                     if (consumed < fwd.length && fwd[consumed] === '\n') consumed++
+                    extraRows++
                     continue
                   }
                   break
+                }
                 }
                 // Now check if the next non-comment line starts with `:`.
                 let hasValue = false
@@ -1308,7 +1367,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 let src = fwd.substring(0, hasValue ? consumed : keyEnd)
                 if (hasValue) {
                   pnt.sI += valConsumed
-                  pnt.rI++
+                  pnt.rI += 1 + extraRows
                   // Set column to actual position after `: ` on the value line (1-indexed).
                   pnt.cI = valConsumed - consumed + 1
                   // Has `: value` — emit KEY now, CL on next call.

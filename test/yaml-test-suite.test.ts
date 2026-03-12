@@ -27,11 +27,9 @@ const SUITE_DIR = join(__dirname, '..', 'test', 'yaml-test-suite')
 // or edge cases where Jsonic's base grammar conflicts with YAML semantics.
 // As parser coverage improves, entries should be removed and tests should pass.
 const SKIP: Record<string, string> = {
-  '5WE3': 'parse error',
   '8KB6': 'parse error',
   '9BXH': 'parse error',
   'CT4Q': 'parse error',
-  'JTV5': 'parse error',
   'K3WX': 'parse error',
 }
 
