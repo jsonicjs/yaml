@@ -545,10 +545,30 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
              (fwd[i] === '.' && fwd[i+1] === '.' && fwd[i+2] === '.' &&
               (fwd[i+3] === ' ' || fwd[i+3] === '\t' || fwd[i+3] === '\n' ||
                fwd[i+3] === '\r' || fwd[i+3] === undefined)))
-          // Check for sequence marker "- ".
-          let isSeqMarker = fwd[i] === '-' &&
-            (fwd[i+1] === ' ' || fwd[i+1] === '\t' || fwd[i+1] === '\n' ||
-             fwd[i+1] === '\r' || fwd[i+1] === undefined)
+          // Check for sequence marker "- ". Only treat as a new sequence
+          // entry when the indent matches an enclosing sequence's level.
+          // Find the nearest "- " sequence marker preceding the text on
+          // the first line to determine the relevant sequence indent.
+          let isSeqMarker = false
+          if (fwd[i] === '-' &&
+              (fwd[i+1] === ' ' || fwd[i+1] === '\t' || fwd[i+1] === '\n' ||
+               fwd[i+1] === '\r' || fwd[i+1] === undefined)) {
+            // Determine the sequence indent from the first line's context.
+            // Look backward from pnt.sI to find "- " markers before the text.
+            let seqIndent = -1
+            let si = pnt.sI - 1
+            while (si >= lineStart) {
+              if (lex.src[si] === '-' && (lex.src[si+1] === ' ' || lex.src[si+1] === '\t')) {
+                seqIndent = si - lineStart
+                break
+              }
+              si--
+            }
+            // isSeqMarker if the continuation "- " matches a known sequence
+            // indent, or if it's at the current line indent level.
+            isSeqMarker = (seqIndent >= 0 && lineIndent === seqIndent) ||
+                          (seqIndent < 0 && lineIndent <= currentLineIndent)
+          }
           let canContinue = inFlowCtx
             ? (i < fwd.length && fwd[i] !== '\n' && fwd[i] !== '\r' &&
                fwd[i] !== '#' && fwd[i] !== '{' && fwd[i] !== '}' &&
