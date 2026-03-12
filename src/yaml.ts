@@ -34,6 +34,261 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
   let pendingExplicitCL = false
   // Queue for tokens that need to be emitted across multiple lex calls.
   let pendingTokens: any[] = []
+  // TAG directive handle mappings (e.g. %TAG !! tag:example.com/).
+  // When !! is redefined, built-in type conversion is skipped.
+  let tagHandles: Record<string, string> = {}
+
+  // Preprocess flow collections for YAML-specific features.
+  // Transforms flow collection content to be Jsonic-compatible:
+  // - Implicit null-valued keys in flow mappings: {a, b: c} → {a: ~, b: c}
+  // - Comments between key and colon: {"foo" # comment\n  :bar} → {"foo" :bar}
+  // - Multiline quoted scalars in flow context: {"multi\n  line"} → {"multi line"}
+  // - Explicit keys (?) inside flow collections
+  function preprocessFlowCollections(src: string): string {
+    let result = ''
+    let i = 0
+
+    while (i < src.length) {
+      if (src[i] === '{' || src[i] === '[') {
+        // Only treat as flow collection if it's at a value position:
+        // after start of string, after newline+indent, after ": ", after "- ",
+        // after ",", after "[" or "{", or preceded only by whitespace on its line.
+        if (isFlowCollectionStart(src, i)) {
+          let processed = processFlowCollection(src, i)
+          result += processed.text
+          i = processed.end
+          continue
+        }
+      }
+      result += src[i]
+      i++
+    }
+    return result
+  }
+
+  // Determine if { or [ at position i is a flow collection opener.
+  function isFlowCollectionStart(src: string, i: number): boolean {
+    if (i === 0) return true
+    // Look backward to find the preceding meaningful character.
+    let j = i - 1
+    while (j >= 0 && (src[j] === ' ' || src[j] === '\t')) j--
+    if (j < 0) return true
+    let prev = src[j]
+    // After newline: it's a flow collection if it's the first thing on the line.
+    if (prev === '\n' || prev === '\r') return true
+    // After value/element/separator indicators.
+    if (prev === ':' || prev === '-' || prev === ',' ||
+        prev === '[' || prev === '{') return true
+    return false
+  }
+
+  function processFlowCollection(src: string, start: number): { text: string, end: number } {
+    let open = src[start]
+    let close = open === '{' ? '}' : ']'
+    let isMap = open === '{'
+    let out = open
+    let i = start + 1
+
+    // Track entries in flow mappings to detect implicit null-valued keys.
+    let entryHasColon = false
+    let entryParts: string[] = []
+
+    while (i < src.length) {
+      let ch = src[i]
+
+      // Handle nested flow collections recursively.
+      if (ch === '{' || ch === '[') {
+        let nested = processFlowCollection(src, i)
+        if (isMap) {
+          entryParts.push(nested.text)
+          entryHasColon = true // nested structures count as values
+        } else {
+          out += nested.text
+        }
+        i = nested.end
+        continue
+      }
+
+      // Handle quoted strings.
+      if (ch === '"') {
+        let str = '"'
+        i++
+        while (i < src.length && src[i] !== '"') {
+          if (src[i] === '\\') { str += src[i]; i++ }
+          // Multiline double-quoted string: fold newlines into space.
+          if (src[i] === '\n' || src[i] === '\r') {
+            if (src[i] === '\r' && src[i + 1] === '\n') i++
+            str += ' '
+            i++
+            while (i < src.length && (src[i] === ' ' || src[i] === '\t')) i++
+            continue
+          }
+          str += src[i]
+          i++
+        }
+        if (i < src.length) { str += '"'; i++ }
+        if (isMap) entryParts.push(str)
+        else out += str
+        continue
+      }
+
+      if (ch === "'") {
+        let str = "'"
+        i++
+        while (i < src.length) {
+          if (src[i] === "'" && src[i + 1] === "'") { str += "''"; i += 2; continue }
+          if (src[i] === "'") break
+          // Multiline single-quoted string: fold newlines into space.
+          if (src[i] === '\n' || src[i] === '\r') {
+            if (src[i] === '\r' && src[i + 1] === '\n') i++
+            str += ' '
+            i++
+            while (i < src.length && (src[i] === ' ' || src[i] === '\t')) i++
+            continue
+          }
+          str += src[i]
+          i++
+        }
+        if (i < src.length) { str += "'"; i++ }
+        if (isMap) entryParts.push(str)
+        else out += str
+        continue
+      }
+
+      // Handle comments: strip them in flow context.
+      if (ch === '#') {
+        // Treat as comment if preceded by whitespace or at start of line.
+        if (i > 0 && (src[i - 1] === ' ' || src[i - 1] === '\t' ||
+            src[i - 1] === '\n' || src[i - 1] === '\r')) {
+          while (i < src.length && src[i] !== '\n' && src[i] !== '\r') i++
+          if (isMap) entryParts.push(' ')
+          else out += ' '
+          continue
+        }
+      }
+
+      // Handle newlines in flow context: fold into space.
+      if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && src[i + 1] === '\n') i++
+        i++
+        // Skip leading whitespace on continuation line.
+        while (i < src.length && (src[i] === ' ' || src[i] === '\t')) i++
+        if (isMap) entryParts.push(' ')
+        else out += ' '
+        continue
+      }
+
+      // Handle colon (key-value separator in flow mapping).
+      if (isMap && ch === ':' && (src[i + 1] === ' ' || src[i + 1] === '\t' ||
+          src[i + 1] === ',' || src[i + 1] === '}' || src[i + 1] === ']' ||
+          src[i + 1] === '\n' || src[i + 1] === '\r' || src[i + 1] === undefined)) {
+        entryHasColon = true
+        entryParts.push(ch)
+        i++
+        continue
+      }
+
+      // Handle adjacent colon (no space after) as key-value separator in flow.
+      if (isMap && ch === ':' && i > start + 1) {
+        // Check if preceded by a quoted string close in the accumulated parts.
+        let accumulated = entryParts.join('').trimEnd()
+        if (accumulated.endsWith('"') || accumulated.endsWith("'")) {
+          entryHasColon = true
+        }
+        entryParts.push(ch)
+        i++
+        continue
+      }
+
+      // Handle comma: end of entry.
+      if (ch === ',') {
+        if (isMap) {
+          let entry = entryParts.join('').trim()
+          if (!entryHasColon && entry.length > 0) {
+            out += entry + ': ~,'
+          } else {
+            out += entry + ','
+          }
+          entryParts = []
+          entryHasColon = false
+        } else {
+          out += ch
+        }
+        i++
+        continue
+      }
+
+      // Handle closing bracket.
+      if (ch === close) {
+        if (isMap) {
+          let entry = entryParts.join('').trim()
+          if (!entryHasColon && entry.length > 0) {
+            out += entry + ': ~'
+          } else {
+            out += entry
+          }
+        }
+        out += close
+        i++
+        return { text: out, end: i }
+      }
+
+      // Handle explicit key indicator in flow context.
+      // Only at the start of an entry (after open bracket/brace, comma,
+      // or after newline with only whitespace before it).
+      if (ch === '?' && (src[i + 1] === ' ' || src[i + 1] === '\t')) {
+        let isEntryStart = false
+        if (!isMap) {
+          // Check if ? is at entry start position in sequence.
+          let prevContent = out.trimEnd()
+          let lastChar = prevContent[prevContent.length - 1]
+          isEntryStart = lastChar === '[' || lastChar === ','
+        } else {
+          let accumulated = entryParts.join('').trim()
+          isEntryStart = accumulated.length === 0
+        }
+        if (isEntryStart && !isMap) {
+          // Convert [? key : val] → [{key: val}]
+          out += '{'
+          let inner = ''
+          i += 2
+          while (i < src.length && src[i] !== ',' && src[i] !== close) {
+            if (src[i] === '\n' || src[i] === '\r') {
+              if (src[i] === '\r' && src[i + 1] === '\n') i++
+              inner += ' '
+              i++
+              while (i < src.length && (src[i] === ' ' || src[i] === '\t')) i++
+              continue
+            }
+            if (src[i] === '#') {
+              while (i < src.length && src[i] !== '\n' && src[i] !== '\r') i++
+              continue
+            }
+            inner += src[i]
+            i++
+          }
+          out += inner.trim() + '}'
+          continue
+        } else if (isEntryStart && isMap) {
+          // In flow mapping, ? is an explicit key indicator — skip it.
+          i += 2
+          continue
+        }
+      }
+
+      // Regular character.
+      if (isMap) entryParts.push(ch)
+      else out += ch
+      i++
+    }
+
+    // Unclosed collection — return what we have.
+    if (isMap) {
+      out += entryParts.join('')
+    }
+    out += close
+    return { text: out, end: i }
+  }
 
   jsonic.options({
     fixed: {
@@ -130,43 +385,62 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             // indent of the containing block (e.g., the mapping key), which
             // may differ from the line's leading spaces (e.g., after "- ").
             if (explicitIndent > 0) {
-              // Find the column of the colon that precedes the block indicator.
-              // The key's indent level is the number of spaces before the key
-              // on this line, which accounts for "- " prefixes.
+              // Find the line containing the block indicator.
               let li = pnt.sI - 1
               while (li > 0 && lex.src[li - 1] !== '\n' && lex.src[li - 1] !== '\r') li--
               // li is now at the start of the line. Find the colon position.
               let keyCol = containingIndent
+              // Check if there's a colon on the SAME line as the block indicator.
+              let hasColonOnLine = false
               for (let ci = li + containingIndent; ci < pnt.sI; ci++) {
                 if (lex.src[ci] === ':' && (lex.src[ci+1] === ' ' || lex.src[ci+1] === '\t')) {
-                  // Key indent is the column of the first non-space after the
-                  // sequence indicators. For "- aaa:", keyCol is 2 (after "- ").
-                  // For "  aaa:", keyCol is 2 (leading spaces).
+                  hasColonOnLine = true
                   break
                 }
               }
-              // Check for sequence indicators: each "- " adds to the effective indent.
-              // But only when the block scalar is a value inside a mapping within
-              // the sequence (e.g., "- key: |2"), not when it's a direct value
-              // (e.g., "- |1"). Detect by checking for ": " between "- " and the
-              // block indicator.
-              let scanI = li + containingIndent
-              let hasColon = false
-              for (let ci = scanI; ci < pnt.sI; ci++) {
-                if (lex.src[ci] === ':' && (lex.src[ci+1] === ' ' || lex.src[ci+1] === '\t')) {
-                  hasColon = true
-                  break
-                }
-              }
-              if (hasColon) {
+              if (hasColonOnLine) {
+                // Block indicator on same line as colon (e.g., "key: |2").
+                // Check for sequence indicators: each "- " adds to the effective indent.
+                let scanI = li + containingIndent
                 while (scanI < pnt.sI && lex.src[scanI] === '-' &&
                        (lex.src[scanI+1] === ' ' || lex.src[scanI+1] === '\t')) {
                   keyCol += 2
                   scanI += 2
                   while (scanI < pnt.sI && lex.src[scanI] === ' ') { keyCol++; scanI++ }
                 }
+                blockIndent = keyCol + explicitIndent
+              } else {
+                // Block indicator on its own line (e.g., after a tag on
+                // a separate line). Look backward to find the parent
+                // mapping key's indent by scanning previous lines for
+                // the colon that started this value context.
+                let parentIndent = 0
+                let searchI = li - 1
+                while (searchI > 0) {
+                  // Find start of previous line.
+                  if (lex.src[searchI] === '\n') searchI--
+                  if (lex.src[searchI] === '\r') searchI--
+                  let prevLineEnd = searchI + 1
+                  while (searchI > 0 && lex.src[searchI - 1] !== '\n' && lex.src[searchI - 1] !== '\r') searchI--
+                  let prevLineStart = searchI
+                  // Check if this line has a colon (mapping key).
+                  for (let ci = prevLineStart; ci < prevLineEnd; ci++) {
+                    if (lex.src[ci] === ':' && (lex.src[ci+1] === ' ' || lex.src[ci+1] === '\t' ||
+                        lex.src[ci+1] === '\n' || lex.src[ci+1] === '\r' || ci+1 >= prevLineEnd)) {
+                      // Found the parent key line. Get its indent.
+                      parentIndent = 0
+                      let pi = prevLineStart
+                      while (pi < prevLineEnd && lex.src[pi] === ' ') { parentIndent++; pi++ }
+                      break
+                    }
+                  }
+                  break  // Only check the immediately preceding non-blank line.
+                }
+                blockIndent = parentIndent + explicitIndent
+                // Update containingIndent to parent's indent so the
+                // "blockIndent <= containingIndent" check below works.
+                containingIndent = parentIndent
               }
-              blockIndent = keyCol + explicitIndent
             }
             if (blockIndent <= containingIndent && !isDocStart && idx < fwd.length) {
               // Content is not indented enough — empty block scalar.
@@ -465,7 +739,9 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         }
 
         // The minimum indent for continuation lines.
-        let minContinuationIndent = isMapValue ? keyIndent + 1 : currentLineIndent
+        // For map values, continuation indent is based on the colon's line indent,
+        // not the previous line's indent (which may be a key continuation line).
+        let minContinuationIndent = isMapValue ? currentLineIndent + 1 : currentLineIndent
         let text = ''
         let i = 0
         let totalConsumed = 0
@@ -523,10 +799,30 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
              (fwd[i] === '.' && fwd[i+1] === '.' && fwd[i+2] === '.' &&
               (fwd[i+3] === ' ' || fwd[i+3] === '\t' || fwd[i+3] === '\n' ||
                fwd[i+3] === '\r' || fwd[i+3] === undefined)))
-          // Check for sequence marker "- ".
-          let isSeqMarker = fwd[i] === '-' &&
-            (fwd[i+1] === ' ' || fwd[i+1] === '\t' || fwd[i+1] === '\n' ||
-             fwd[i+1] === '\r' || fwd[i+1] === undefined)
+          // Check for sequence marker "- ". Only treat as a new sequence
+          // entry when the indent matches an enclosing sequence's level.
+          // Find the nearest "- " sequence marker preceding the text on
+          // the first line to determine the relevant sequence indent.
+          let isSeqMarker = false
+          if (fwd[i] === '-' &&
+              (fwd[i+1] === ' ' || fwd[i+1] === '\t' || fwd[i+1] === '\n' ||
+               fwd[i+1] === '\r' || fwd[i+1] === undefined)) {
+            // Determine the sequence indent from the first line's context.
+            // Look backward from pnt.sI to find "- " markers before the text.
+            let seqIndent = -1
+            let si = pnt.sI - 1
+            while (si >= lineStart) {
+              if (lex.src[si] === '-' && (lex.src[si+1] === ' ' || lex.src[si+1] === '\t')) {
+                seqIndent = si - lineStart
+                break
+              }
+              si--
+            }
+            // isSeqMarker if the continuation "- " matches a known sequence
+            // indent, or if it's at the current line indent level.
+            isSeqMarker = (seqIndent >= 0 && lineIndent === seqIndent) ||
+                          (seqIndent < 0 && lineIndent <= currentLineIndent)
+          }
           let canContinue = inFlowCtx
             ? (i < fwd.length && fwd[i] !== '\n' && fwd[i] !== '\r' &&
                fwd[i] !== '#' && fwd[i] !== '{' && fwd[i] !== '}' &&
@@ -650,6 +946,15 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 if (src[0] === '%') {
                   let dIdx = src.indexOf('\n---')
                   if (dIdx >= 0) {
+                    // Parse %TAG directives before stripping.
+                    let dirBlock = src.substring(0, dIdx)
+                    let dirLines = dirBlock.split('\n')
+                    for (let dl of dirLines) {
+                      let tagMatch = dl.match(/^%TAG\s+(\S+)\s+(\S+)/)
+                      if (tagMatch) {
+                        tagHandles[tagMatch[1]] = tagMatch[2]
+                      }
+                    }
                     hadDirective = true
                     src = src.substring(dIdx + 1)
                   }
@@ -734,6 +1039,14 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 if (docStripped && /^(---|\.\.\.)(\s|$)/.test(src)) {
                   src = ''
                 }
+                // Preprocess flow collections for YAML-specific features
+                // that Jsonic's core parser doesn't handle natively:
+                // - Implicit null-valued keys in flow mappings: {a, b: c}
+                // - Comments between key and colon: {"foo" # comment\n  :bar}
+                // - Multiline plain/quoted scalars in flow context
+                // - Explicit keys (?) inside flow collections
+                src = preprocessFlowCollections(src)
+
                 lex.src = src
                 lex.pnt.len = src.length
                 // If source is empty/whitespace/comments-only after preprocessing,
@@ -792,7 +1105,13 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 while (nameEnd < fwd.length && fwd[nameEnd] !== ' ' && fwd[nameEnd] !== '\t' &&
                        fwd[nameEnd] !== '\n' && fwd[nameEnd] !== '\r' && fwd[nameEnd] !== ',' &&
                        fwd[nameEnd] !== '{' && fwd[nameEnd] !== '}' && fwd[nameEnd] !== '[' &&
-                       fwd[nameEnd] !== ']' && fwd[nameEnd] !== ':') nameEnd++
+                       fwd[nameEnd] !== ']') {
+                  // Colon terminates only when followed by space/tab (key-value separator).
+                  // Otherwise colon is a valid anchor-name character per YAML spec.
+                  if (fwd[nameEnd] === ':' &&
+                      (fwd[nameEnd+1] === ' ' || fwd[nameEnd+1] === '\t')) break
+                  nameEnd++
+                }
                 let name = fwd.substring(1, nameEnd)
                 let src = fwd.substring(0, nameEnd)
                 // Check if this alias is used as a map key (followed by ` :` or `:`).
@@ -810,9 +1129,22 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   pnt.cI += nameEnd
                   return tkn
                 }
-                // Store the alias name as a special marker object.
-                let marker = { __yamlAlias: name }
-                let tkn = lex.token('#VL', marker, src, lex.pnt)
+                // Resolve alias immediately if anchor exists, since deferred
+                // markers can be lost through Jsonic's rule processing.
+                let tkn: any
+                if (anchors[name] !== undefined) {
+                  let val = anchors[name]
+                  if (typeof val === 'object' && val !== null) {
+                    val = JSON.parse(JSON.stringify(val))
+                  }
+                  let tin = typeof val === 'string' ? '#TX' :
+                            typeof val === 'number' ? '#NR' : '#VL'
+                  tkn = lex.token(tin, val, src, lex.pnt)
+                } else {
+                  // Anchor not yet seen — store marker for deferred resolution.
+                  let marker = { __yamlAlias: name }
+                  tkn = lex.token('#VL', marker, src, lex.pnt)
+                }
                 pnt.sI += nameEnd
                 pnt.cI += nameEnd
                 return tkn
@@ -965,6 +1297,33 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 if (fwd[tagEnd] === ' ') tagEnd++ // skip space after tag
                 pnt.sI += tagEnd
                 pnt.cI += tagEnd
+                // If tag is standalone (followed by newline), consume the
+                // newline and leading spaces so no extra #IN is emitted.
+                if (pnt.sI < lex.src.length &&
+                    (lex.src[pnt.sI] === '\n' || lex.src[pnt.sI] === '\r')) {
+                  // Check if tag is standalone on its line.
+                  let tagStandalone = true
+                  let tagLineIndent = 0
+                  let bi = pnt.sI - tagEnd - 1
+                  while (bi >= 0 && lex.src[bi] !== '\n' && lex.src[bi] !== '\r') {
+                    if (lex.src[bi] !== ' ' && lex.src[bi] !== '\t') {
+                      tagStandalone = false
+                      break
+                    }
+                    tagLineIndent++
+                    bi--
+                  }
+                  if (tagStandalone) {
+                    let nl = pnt.sI
+                    if (lex.src[nl] === '\r') nl++
+                    if (lex.src[nl] === '\n') nl++
+                    let spaces = 0
+                    while (nl + spaces < lex.src.length && lex.src[nl + spaces] === ' ') spaces++
+                    pnt.sI = nl + spaces
+                    pnt.cI = spaces
+                    pnt.rI++
+                  }
+                }
                 fwd = lex.src.substring(pnt.sI)
                 // Restart matching to parse the value.
                 continue yamlMatchLoop
@@ -1053,10 +1412,12 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   if (fwd[valEnd] === q) valEnd++
                   let rawVal = fwd.substring(valStart + 1, valEnd - 1)
                   let result: any = rawVal
-                  if (tag === 'int') result = parseInt(rawVal, 10)
-                  else if (tag === 'float') result = parseFloat(rawVal)
-                  else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
-                  else if (tag === 'null') result = null
+                  if (!tagHandles['!!']) {
+                    if (tag === 'int') result = parseInt(rawVal, 10)
+                    else if (tag === 'float') result = parseFloat(rawVal)
+                    else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
+                    else if (tag === 'null') result = null
+                  }
                   if (tagAnchorName) anchors[tagAnchorName] = result
                   let tknTin = typeof result === 'string' ? '#TX' :
                                typeof result === 'number' ? '#NR' : '#VL'
@@ -1092,11 +1453,16 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 }
                 let rawVal = fwd.substring(valStart, valEnd).replace(/\s+$/, '')
                 let result: any = rawVal
-                if (tag === 'str') result = String(rawVal)
-                else if (tag === 'int') result = parseInt(rawVal, 10)
-                else if (tag === 'float') result = parseFloat(rawVal)
-                else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
-                else if (tag === 'null') result = null
+                // Only apply built-in type conversion when !! has not been
+                // redefined by a %TAG directive. Custom tag handles mean
+                // !!type is a user-defined tag, not a YAML core type.
+                if (!tagHandles['!!']) {
+                  if (tag === 'str') result = String(rawVal)
+                  else if (tag === 'int') result = parseInt(rawVal, 10)
+                  else if (tag === 'float') result = parseFloat(rawVal)
+                  else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
+                  else if (tag === 'null') result = null
+                }
                 if (tagAnchorName) anchors[tagAnchorName] = result
                 // Use #ST for empty strings (jsonic handles #ST better than
                 // empty #TX in flow context), #NR for numbers, #VL for null.
@@ -1149,7 +1515,61 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   while (li > 0 && lex.src[li-1] !== '\n' && lex.src[li-1] !== '\r') li--
                   while (li < pnt.sI && lex.src[li] === ' ') { qIndent++; li++ }
                 }
-                // Scan continuation lines for key.
+                // Count extra rows consumed (for multiline keys).
+                let extraRows = 0
+
+                // Handle block scalar keys (| or >).
+                let blockScalarMatch = key.match(/^([|>])([+-]?)([0-9]?)$/)
+                if (blockScalarMatch) {
+                  let isFolded = blockScalarMatch[1] === '>'
+                  let chomp = blockScalarMatch[2] || ''
+                  let explicitIndent = blockScalarMatch[3] ? parseInt(blockScalarMatch[3]) : 0
+                  // Collect block scalar content lines.
+                  let blockLines: string[] = []
+                  let contentIndent = 0
+                  while (consumed < fwd.length) {
+                    let lineIndent = 0
+                    while (consumed + lineIndent < fwd.length && fwd[consumed + lineIndent] === ' ') lineIndent++
+                    let afterSpaces = consumed + lineIndent
+                    // Empty line or line with only spaces.
+                    if (afterSpaces >= fwd.length || fwd[afterSpaces] === '\n' || fwd[afterSpaces] === '\r') {
+                      blockLines.push('')
+                      consumed = afterSpaces
+                      if (consumed < fwd.length && fwd[consumed] === '\r') consumed++
+                      if (consumed < fwd.length && fwd[consumed] === '\n') consumed++
+                      extraRows++
+                      continue
+                    }
+                    // Determine content indent from first non-empty line.
+                    if (contentIndent === 0) {
+                      contentIndent = explicitIndent > 0 ? qIndent + explicitIndent : lineIndent
+                    }
+                    // Line must be indented more than ? to be content.
+                    if (lineIndent < contentIndent) break
+                    // Collect line content.
+                    let lineEnd = afterSpaces
+                    while (lineEnd < fwd.length && fwd[lineEnd] !== '\n' && fwd[lineEnd] !== '\r') lineEnd++
+                    blockLines.push(fwd.substring(consumed + contentIndent, lineEnd))
+                    consumed = lineEnd
+                    if (consumed < fwd.length && fwd[consumed] === '\r') consumed++
+                    if (consumed < fwd.length && fwd[consumed] === '\n') consumed++
+                    extraRows++
+                  }
+                  // Apply chomping.
+                  // Remove trailing empty lines for non-keep.
+                  if (chomp !== '+') {
+                    while (blockLines.length > 0 && blockLines[blockLines.length - 1] === '') blockLines.pop()
+                  }
+                  if (isFolded) {
+                    key = blockLines.join(' ') + '\n'
+                  } else {
+                    key = blockLines.join('\n') + '\n'
+                  }
+                  if (chomp === '-') {
+                    key = key.replace(/\n$/, '')
+                  }
+                } else {
+                // Scan continuation lines for key (plain scalar multiline).
                 while (consumed < fwd.length) {
                   // Skip comment lines.
                   let lineIndent = 0
@@ -1161,6 +1581,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                     beforeNewline = afterSpaces
                     if (afterSpaces < fwd.length && fwd[afterSpaces] === '\r') afterSpaces++
                     if (afterSpaces < fwd.length && fwd[afterSpaces] === '\n') afterSpaces++
+                    extraRows++
                     consumed = afterSpaces
                     continue
                   }
@@ -1181,9 +1602,11 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                     beforeNewline = consumed
                     if (consumed < fwd.length && fwd[consumed] === '\r') consumed++
                     if (consumed < fwd.length && fwd[consumed] === '\n') consumed++
+                    extraRows++
                     continue
                   }
                   break
+                }
                 }
                 // Now check if the next non-comment line starts with `:`.
                 let hasValue = false
@@ -1204,8 +1627,9 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 let src = fwd.substring(0, hasValue ? consumed : keyEnd)
                 if (hasValue) {
                   pnt.sI += valConsumed
-                  pnt.rI++
-                  pnt.cI = 1
+                  pnt.rI += 1 + extraRows
+                  // Set column to actual position after `: ` on the value line (1-indexed).
+                  pnt.cI = valConsumed - consumed + 1
                   // Has `: value` — emit KEY now, CL on next call.
                   pendingExplicitCL = true
                 } else {

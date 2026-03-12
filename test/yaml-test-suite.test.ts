@@ -27,18 +27,6 @@ const SUITE_DIR = join(__dirname, '..', 'test', 'yaml-test-suite')
 // or edge cases where Jsonic's base grammar conflicts with YAML semantics.
 // As parser coverage improves, entries should be removed and tests should pass.
 const SKIP: Record<string, string> = {
-  '2SXE': 'output mismatch',
-  '5WE3': 'parse error',
-  '8KB6': 'parse error',
-  '9BXH': 'parse error',
-  'A2M4': 'output mismatch',
-  'AB8U': 'output mismatch',
-  'CT4Q': 'parse error',
-  'JTV5': 'parse error',
-  'K3WX': 'parse error',
-  'M5C3': 'parse error',
-  'P76L': 'output mismatch',
-  'W5VH': 'output mismatch',
 }
 
 
@@ -227,7 +215,7 @@ describe('yaml-test-suite', () => {
       const skipReason = SKIP[tc.id]
 
       test(`${tc.id}: ${tc.name}`, { skip: skipReason || undefined }, () => {
-        const inYaml = readFileSync(join(tc.dir, 'in.yaml'), 'utf8')
+        const inYaml = readFileSync(join(tc.dir, 'in.yaml'), 'utf8').replace(/\r\n/g, '\n')
         const inJsonRaw = readFileSync(join(tc.dir, 'in.json'), 'utf8')
         const { value: expected, multiDoc } = parseExpectedJson(inJsonRaw)
 
@@ -259,7 +247,7 @@ describe('yaml-test-suite', () => {
       const skipReason = SKIP[tc.id]
 
       test(`${tc.id}: ${tc.name}`, { skip: skipReason || undefined }, () => {
-        const inYaml = readFileSync(join(tc.dir, 'in.yaml'), 'utf8')
+        const inYaml = readFileSync(join(tc.dir, 'in.yaml'), 'utf8').replace(/\r\n/g, '\n')
         const j = Jsonic.make().use(Yaml)
 
         let threw = false
