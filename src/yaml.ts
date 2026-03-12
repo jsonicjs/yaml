@@ -34,6 +34,9 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
   let pendingExplicitCL = false
   // Queue for tokens that need to be emitted across multiple lex calls.
   let pendingTokens: any[] = []
+  // TAG directive handle mappings (e.g. %TAG !! tag:example.com/).
+  // When !! is redefined, built-in type conversion is skipped.
+  let tagHandles: Record<string, string> = {}
 
   jsonic.options({
     fixed: {
@@ -650,6 +653,15 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 if (src[0] === '%') {
                   let dIdx = src.indexOf('\n---')
                   if (dIdx >= 0) {
+                    // Parse %TAG directives before stripping.
+                    let dirBlock = src.substring(0, dIdx)
+                    let dirLines = dirBlock.split('\n')
+                    for (let dl of dirLines) {
+                      let tagMatch = dl.match(/^%TAG\s+(\S+)\s+(\S+)/)
+                      if (tagMatch) {
+                        tagHandles[tagMatch[1]] = tagMatch[2]
+                      }
+                    }
                     hadDirective = true
                     src = src.substring(dIdx + 1)
                   }
@@ -1072,10 +1084,12 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   if (fwd[valEnd] === q) valEnd++
                   let rawVal = fwd.substring(valStart + 1, valEnd - 1)
                   let result: any = rawVal
-                  if (tag === 'int') result = parseInt(rawVal, 10)
-                  else if (tag === 'float') result = parseFloat(rawVal)
-                  else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
-                  else if (tag === 'null') result = null
+                  if (!tagHandles['!!']) {
+                    if (tag === 'int') result = parseInt(rawVal, 10)
+                    else if (tag === 'float') result = parseFloat(rawVal)
+                    else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
+                    else if (tag === 'null') result = null
+                  }
                   if (tagAnchorName) anchors[tagAnchorName] = result
                   let tknTin = typeof result === 'string' ? '#TX' :
                                typeof result === 'number' ? '#NR' : '#VL'
@@ -1111,11 +1125,16 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 }
                 let rawVal = fwd.substring(valStart, valEnd).replace(/\s+$/, '')
                 let result: any = rawVal
-                if (tag === 'str') result = String(rawVal)
-                else if (tag === 'int') result = parseInt(rawVal, 10)
-                else if (tag === 'float') result = parseFloat(rawVal)
-                else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
-                else if (tag === 'null') result = null
+                // Only apply built-in type conversion when !! has not been
+                // redefined by a %TAG directive. Custom tag handles mean
+                // !!type is a user-defined tag, not a YAML core type.
+                if (!tagHandles['!!']) {
+                  if (tag === 'str') result = String(rawVal)
+                  else if (tag === 'int') result = parseInt(rawVal, 10)
+                  else if (tag === 'float') result = parseFloat(rawVal)
+                  else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
+                  else if (tag === 'null') result = null
+                }
                 if (tagAnchorName) anchors[tagAnchorName] = result
                 // Use #ST for empty strings (jsonic handles #ST better than
                 // empty #TX in flow context), #NR for numbers, #VL for null.
