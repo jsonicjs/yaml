@@ -38,6 +38,258 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
   // When !! is redefined, built-in type conversion is skipped.
   let tagHandles: Record<string, string> = {}
 
+  // Preprocess flow collections for YAML-specific features.
+  // Transforms flow collection content to be Jsonic-compatible:
+  // - Implicit null-valued keys in flow mappings: {a, b: c} → {a: ~, b: c}
+  // - Comments between key and colon: {"foo" # comment\n  :bar} → {"foo" :bar}
+  // - Multiline quoted scalars in flow context: {"multi\n  line"} → {"multi line"}
+  // - Explicit keys (?) inside flow collections
+  function preprocessFlowCollections(src: string): string {
+    let result = ''
+    let i = 0
+
+    while (i < src.length) {
+      if (src[i] === '{' || src[i] === '[') {
+        // Only treat as flow collection if it's at a value position:
+        // after start of string, after newline+indent, after ": ", after "- ",
+        // after ",", after "[" or "{", or preceded only by whitespace on its line.
+        if (isFlowCollectionStart(src, i)) {
+          let processed = processFlowCollection(src, i)
+          result += processed.text
+          i = processed.end
+          continue
+        }
+      }
+      result += src[i]
+      i++
+    }
+    return result
+  }
+
+  // Determine if { or [ at position i is a flow collection opener.
+  function isFlowCollectionStart(src: string, i: number): boolean {
+    if (i === 0) return true
+    // Look backward to find the preceding meaningful character.
+    let j = i - 1
+    while (j >= 0 && (src[j] === ' ' || src[j] === '\t')) j--
+    if (j < 0) return true
+    let prev = src[j]
+    // After newline: it's a flow collection if it's the first thing on the line.
+    if (prev === '\n' || prev === '\r') return true
+    // After value/element/separator indicators.
+    if (prev === ':' || prev === '-' || prev === ',' ||
+        prev === '[' || prev === '{') return true
+    return false
+  }
+
+  function processFlowCollection(src: string, start: number): { text: string, end: number } {
+    let open = src[start]
+    let close = open === '{' ? '}' : ']'
+    let isMap = open === '{'
+    let out = open
+    let i = start + 1
+
+    // Track entries in flow mappings to detect implicit null-valued keys.
+    let entryHasColon = false
+    let entryParts: string[] = []
+
+    while (i < src.length) {
+      let ch = src[i]
+
+      // Handle nested flow collections recursively.
+      if (ch === '{' || ch === '[') {
+        let nested = processFlowCollection(src, i)
+        if (isMap) {
+          entryParts.push(nested.text)
+          entryHasColon = true // nested structures count as values
+        } else {
+          out += nested.text
+        }
+        i = nested.end
+        continue
+      }
+
+      // Handle quoted strings.
+      if (ch === '"') {
+        let str = '"'
+        i++
+        while (i < src.length && src[i] !== '"') {
+          if (src[i] === '\\') { str += src[i]; i++ }
+          // Multiline double-quoted string: fold newlines into space.
+          if (src[i] === '\n' || src[i] === '\r') {
+            if (src[i] === '\r' && src[i + 1] === '\n') i++
+            str += ' '
+            i++
+            while (i < src.length && (src[i] === ' ' || src[i] === '\t')) i++
+            continue
+          }
+          str += src[i]
+          i++
+        }
+        if (i < src.length) { str += '"'; i++ }
+        if (isMap) entryParts.push(str)
+        else out += str
+        continue
+      }
+
+      if (ch === "'") {
+        let str = "'"
+        i++
+        while (i < src.length) {
+          if (src[i] === "'" && src[i + 1] === "'") { str += "''"; i += 2; continue }
+          if (src[i] === "'") break
+          // Multiline single-quoted string: fold newlines into space.
+          if (src[i] === '\n' || src[i] === '\r') {
+            if (src[i] === '\r' && src[i + 1] === '\n') i++
+            str += ' '
+            i++
+            while (i < src.length && (src[i] === ' ' || src[i] === '\t')) i++
+            continue
+          }
+          str += src[i]
+          i++
+        }
+        if (i < src.length) { str += "'"; i++ }
+        if (isMap) entryParts.push(str)
+        else out += str
+        continue
+      }
+
+      // Handle comments: strip them in flow context.
+      if (ch === '#') {
+        // Treat as comment if preceded by whitespace or at start of line.
+        if (i > 0 && (src[i - 1] === ' ' || src[i - 1] === '\t' ||
+            src[i - 1] === '\n' || src[i - 1] === '\r')) {
+          while (i < src.length && src[i] !== '\n' && src[i] !== '\r') i++
+          if (isMap) entryParts.push(' ')
+          else out += ' '
+          continue
+        }
+      }
+
+      // Handle newlines in flow context: fold into space.
+      if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && src[i + 1] === '\n') i++
+        i++
+        // Skip leading whitespace on continuation line.
+        while (i < src.length && (src[i] === ' ' || src[i] === '\t')) i++
+        if (isMap) entryParts.push(' ')
+        else out += ' '
+        continue
+      }
+
+      // Handle colon (key-value separator in flow mapping).
+      if (isMap && ch === ':' && (src[i + 1] === ' ' || src[i + 1] === '\t' ||
+          src[i + 1] === ',' || src[i + 1] === '}' || src[i + 1] === ']' ||
+          src[i + 1] === '\n' || src[i + 1] === '\r' || src[i + 1] === undefined)) {
+        entryHasColon = true
+        entryParts.push(ch)
+        i++
+        continue
+      }
+
+      // Handle adjacent colon (no space after) as key-value separator in flow.
+      if (isMap && ch === ':' && i > start + 1) {
+        // Check if preceded by a quoted string close in the accumulated parts.
+        let accumulated = entryParts.join('').trimEnd()
+        if (accumulated.endsWith('"') || accumulated.endsWith("'")) {
+          entryHasColon = true
+        }
+        entryParts.push(ch)
+        i++
+        continue
+      }
+
+      // Handle comma: end of entry.
+      if (ch === ',') {
+        if (isMap) {
+          let entry = entryParts.join('').trim()
+          if (!entryHasColon && entry.length > 0) {
+            out += entry + ': ~,'
+          } else {
+            out += entry + ','
+          }
+          entryParts = []
+          entryHasColon = false
+        } else {
+          out += ch
+        }
+        i++
+        continue
+      }
+
+      // Handle closing bracket.
+      if (ch === close) {
+        if (isMap) {
+          let entry = entryParts.join('').trim()
+          if (!entryHasColon && entry.length > 0) {
+            out += entry + ': ~'
+          } else {
+            out += entry
+          }
+        }
+        out += close
+        i++
+        return { text: out, end: i }
+      }
+
+      // Handle explicit key indicator in flow context.
+      // Only at the start of an entry (after open bracket/brace, comma,
+      // or after newline with only whitespace before it).
+      if (ch === '?' && (src[i + 1] === ' ' || src[i + 1] === '\t')) {
+        let isEntryStart = false
+        if (!isMap) {
+          // Check if ? is at entry start position in sequence.
+          let prevContent = out.trimEnd()
+          let lastChar = prevContent[prevContent.length - 1]
+          isEntryStart = lastChar === '[' || lastChar === ','
+        } else {
+          let accumulated = entryParts.join('').trim()
+          isEntryStart = accumulated.length === 0
+        }
+        if (isEntryStart && !isMap) {
+          // Convert [? key : val] → [{key: val}]
+          out += '{'
+          let inner = ''
+          i += 2
+          while (i < src.length && src[i] !== ',' && src[i] !== close) {
+            if (src[i] === '\n' || src[i] === '\r') {
+              if (src[i] === '\r' && src[i + 1] === '\n') i++
+              inner += ' '
+              i++
+              while (i < src.length && (src[i] === ' ' || src[i] === '\t')) i++
+              continue
+            }
+            if (src[i] === '#') {
+              while (i < src.length && src[i] !== '\n' && src[i] !== '\r') i++
+              continue
+            }
+            inner += src[i]
+            i++
+          }
+          out += inner.trim() + '}'
+          continue
+        } else if (isEntryStart && isMap) {
+          // In flow mapping, ? is an explicit key indicator — skip it.
+          i += 2
+          continue
+        }
+      }
+
+      // Regular character.
+      if (isMap) entryParts.push(ch)
+      else out += ch
+      i++
+    }
+
+    // Unclosed collection — return what we have.
+    if (isMap) {
+      out += entryParts.join('')
+    }
+    out += close
+    return { text: out, end: i }
+  }
+
   jsonic.options({
     fixed: {
       token: {
@@ -787,6 +1039,14 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 if (docStripped && /^(---|\.\.\.)(\s|$)/.test(src)) {
                   src = ''
                 }
+                // Preprocess flow collections for YAML-specific features
+                // that Jsonic's core parser doesn't handle natively:
+                // - Implicit null-valued keys in flow mappings: {a, b: c}
+                // - Comments between key and colon: {"foo" # comment\n  :bar}
+                // - Multiline plain/quoted scalars in flow context
+                // - Explicit keys (?) inside flow collections
+                src = preprocessFlowCollections(src)
+
                 lex.src = src
                 lex.pnt.len = src.length
                 // If source is empty/whitespace/comments-only after preprocessing,
