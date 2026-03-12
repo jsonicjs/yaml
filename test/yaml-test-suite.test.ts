@@ -215,7 +215,7 @@ describe('yaml-test-suite', () => {
       const skipReason = SKIP[tc.id]
 
       test(`${tc.id}: ${tc.name}`, { skip: skipReason || undefined }, () => {
-        const inYaml = readFileSync(join(tc.dir, 'in.yaml'), 'utf8')
+        const inYaml = readFileSync(join(tc.dir, 'in.yaml'), 'utf8').replace(/\r\n/g, '\n')
         const inJsonRaw = readFileSync(join(tc.dir, 'in.json'), 'utf8')
         const { value: expected, multiDoc } = parseExpectedJson(inJsonRaw)
 
@@ -247,7 +247,7 @@ describe('yaml-test-suite', () => {
       const skipReason = SKIP[tc.id]
 
       test(`${tc.id}: ${tc.name}`, { skip: skipReason || undefined }, () => {
-        const inYaml = readFileSync(join(tc.dir, 'in.yaml'), 'utf8')
+        const inYaml = readFileSync(join(tc.dir, 'in.yaml'), 'utf8').replace(/\r\n/g, '\n')
         const j = Jsonic.make().use(Yaml)
 
         let threw = false
