@@ -32,6 +32,8 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) {
 	pendingExplicitCL := false
 	var pendingTokens []*jsonic.Token
 	tagHandles := make(map[string]string)
+	// Flag to tell the number matcher to skip, so TextCheck handles the value.
+	skipNumberMatch := false
 
 	// Remove colon as a fixed token — YAML uses ": " (colon-space).
 	cfg := j.Config()
@@ -43,6 +45,16 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) {
 		cfg.EnderChars = make(map[rune]bool)
 	}
 	cfg.EnderChars[':'] = true
+
+	// Skip number matching when the yamlMatcher detected trailing text
+	// after a digit-starting value (e.g. "64 characters, hexadecimal.").
+	cfg.NumberCheck = func(lex *jsonic.Lex) *jsonic.LexCheckResult {
+		if skipNumberMatch {
+			skipNumberMatch = false
+			return &jsonic.LexCheckResult{Done: true}
+		}
+		return nil
+	}
 
 	// ===== TextCheck: handles block scalars, !!tags, and plain scalars =====
 	cfg.TextCheck = func(lex *jsonic.Lex) *jsonic.LexCheckResult {
@@ -464,7 +476,7 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) {
 
 			// Plain scalars starting with digits that contain colons (e.g. 20:03:20).
 			if fwd[0] >= '0' && fwd[0] <= '9' {
-				if tkn := handleNumericColon(lex, pnt, fwd, TX); tkn != nil {
+				if tkn := handleNumericColon(lex, pnt, fwd, TX, &skipNumberMatch); tkn != nil {
 					return tkn
 				}
 			}
@@ -1877,9 +1889,13 @@ func handleSingleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 	return tkn
 }
 
-// handleNumericColon handles plain scalars starting with digits that contain colons.
-func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsonic.Tin) *jsonic.Token {
+// handleNumericColon handles plain scalars starting with digits that contain
+// colons (e.g. 20:03:20) or trailing text after a space (e.g. "64 characters, hexadecimal.").
+// The skipNumberMatch parameter is set to true when trailing text is detected,
+// so the NumberCheck callback can skip the number matcher and let TextCheck handle it.
+func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsonic.Tin, skipNumberMatch *bool) *jsonic.Token {
 	hasEmbeddedColon := false
+	hasTrailingText := false
 	pi := 1
 	for pi < len(fwd) && fwd[pi] != '\n' && fwd[pi] != '\r' {
 		if fwd[pi] == ':' && pi+1 < len(fwd) && fwd[pi+1] != ' ' && fwd[pi+1] != '\t' &&
@@ -1888,9 +1904,56 @@ func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsoni
 			break
 		}
 		if fwd[pi] == ' ' || fwd[pi] == '\t' {
+			// Check if after the space there are non-separator characters,
+			// meaning this is a plain scalar like "64 characters, hexadecimal."
+			si := pi
+			for si < len(fwd) && (fwd[si] == ' ' || fwd[si] == '\t') {
+				si++
+			}
+			if si < len(fwd) && fwd[si] != '\n' && fwd[si] != '\r' &&
+				fwd[si] != '#' && fwd[si] != ':' {
+				hasTrailingText = true
+			}
 			break
 		}
 		pi++
+	}
+	if hasTrailingText {
+		// Check if we're in a flow context — if so, the number is standalone.
+		inFlow := false
+		src := lex.Src
+		flowDepth := 0
+		for fi := 0; fi < pnt.SI; fi++ {
+			c := src[fi]
+			if c == '{' || c == '[' {
+				flowDepth++
+			} else if c == '}' || c == ']' {
+				if flowDepth > 0 {
+					flowDepth--
+				}
+			} else if c == '"' {
+				fi++
+				for fi < pnt.SI && src[fi] != '"' {
+					if src[fi] == '\\' {
+						fi++
+					}
+					fi++
+				}
+			} else if c == '\'' {
+				fi++
+				for fi < pnt.SI && src[fi] != '\'' {
+					if fi+1 < pnt.SI && src[fi] == '\'' && src[fi+1] == '\'' {
+						fi++
+					}
+					fi++
+				}
+			}
+		}
+		inFlow = flowDepth > 0
+		if !inFlow {
+			*skipNumberMatch = true
+			return nil
+		}
 	}
 	if !hasEmbeddedColon {
 		return nil
