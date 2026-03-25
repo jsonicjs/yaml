@@ -77,8 +77,10 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
     // After newline: it's a flow collection if it's the first thing on the line.
     if (prev === '\n' || prev === '\r') return true
     // After value/element/separator indicators.
-    if (prev === ':' || prev === '-' || prev === ',' ||
-        prev === '[' || prev === '{') return true
+    // NOTE: Do NOT treat a preceding "{" or "[" as a flow start signal.
+    // That incorrectly classifies plain scalars such as: a{{q}}b
+    // as nested flow collections.
+    if (prev === ':' || prev === '-' || prev === ',') return true
     return false
   }
 

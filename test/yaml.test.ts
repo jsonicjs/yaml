@@ -183,6 +183,10 @@ c:
       expect(y(`a: hello, world!`)).equal({ a: 'hello, world!' })
     })
 
+    test('plain-string-with-double-curly-braces', () => {
+      expect(y(`foo: a{{q}}b`)).equal({ foo: 'a{{q}}b' })
+    })
+
     test('octal-number', () => {
       // YAML 1.2: 0o77 = 63
       expect(y(`a: 0o77`)).equal({ a: 63 })
@@ -267,6 +271,14 @@ c:
     test('single-quoted-no-escapes', () => {
       // Single-quoted strings don't process escapes in YAML
       expect(y(`a: 'line1\\nline2'`)).equal({ a: 'line1\\nline2' })
+    })
+
+    test('single-quoted-with-double-curly-braces', () => {
+      expect(y(`foo: 'a{{q}}b'`)).equal({ foo: 'a{{q}}b' })
+    })
+
+    test('double-quoted-with-double-curly-braces', () => {
+      expect(y(`foo: "a{{q}}b"`)).equal({ foo: 'a{{q}}b' })
     })
 
     test('double-quoted-empty', () => {
