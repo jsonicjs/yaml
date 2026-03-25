@@ -32,6 +32,8 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
   let anchors: Record<string, any> = {}
   let pendingAnchors: { name: string, inline: boolean }[] = []
   let pendingExplicitCL = false
+  // Flag to tell the number matcher to skip, so text.check handles the value.
+  let skipNumberMatch = false
   // Queue for tokens that need to be emitted across multiple lex calls.
   let pendingTokens: any[] = []
   // TAG directive handle mappings (e.g. %TAG !! tag:example.com/).
@@ -307,6 +309,17 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
     // don't process backslash escapes, so we handle them in yamlMatcher.
     string: {
       chars: '`',
+    },
+
+    // Skip number matching when yamlMatcher detected trailing text
+    // after a digit-starting value (e.g. "64 characters, hexadecimal.").
+    number: {
+      check: (_lex: any) => {
+        if (skipNumberMatch) {
+          skipNumberMatch = false
+          return { done: true }
+        }
+      },
     },
 
     // Custom text check: consume to end of line (including spaces)
@@ -1907,9 +1920,11 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               }
 
               // Plain scalars starting with digits but containing colons (e.g. 20:03:20)
+              // or non-numeric text after a space (e.g. "64 characters, hexadecimal.")
               // must be captured before jsonic's number matcher grabs just the digits.
               if (fwd[0] >= '0' && fwd[0] <= '9') {
                 let hasEmbeddedColon = false
+                let hasTrailingText = false
                 let pi = 1
                 while (pi < fwd.length && fwd[pi] !== '\n' && fwd[pi] !== '\r') {
                   if (fwd[pi] === ':' && fwd[pi + 1] !== ' ' && fwd[pi + 1] !== '\t' &&
@@ -1917,7 +1932,22 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                     hasEmbeddedColon = true
                     break
                   }
-                  if (fwd[pi] === ' ' || fwd[pi] === '\t') break
+                  if (fwd[pi] === ' ' || fwd[pi] === '\t') {
+                    // Check if after the space there are non-separator characters,
+                    // meaning this is a plain scalar like "64 characters, hexadecimal."
+                    // not a standalone number.
+                    let si = pi
+                    while (si < fwd.length && (fwd[si] === ' ' || fwd[si] === '\t')) si++
+                    if (si < fwd.length && fwd[si] !== '\n' && fwd[si] !== '\r' &&
+                        fwd[si] !== '#' && fwd[si] !== ':' && fwd[si] !== undefined) {
+                      // Check it's not ": " (key-value separator).
+                      if (!(fwd[si] === ':' && (fwd[si + 1] === ' ' || fwd[si + 1] === '\t' ||
+                            fwd[si + 1] === '\n' || fwd[si + 1] === '\r' || fwd[si + 1] === undefined))) {
+                        hasTrailingText = true
+                      }
+                    }
+                    break
+                  }
                   pi++
                 }
                 if (hasEmbeddedColon) {
@@ -1930,6 +1960,13 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   pnt.sI += end
                   pnt.cI += end
                   return tkn
+                }
+                if (hasTrailingText) {
+                  // Flag that the number matcher should skip this value,
+                  // so the text.check handler can process it as a plain
+                  // scalar (including multiline continuation support).
+                  skipNumberMatch = true
+                  return null
                 }
               }
 
