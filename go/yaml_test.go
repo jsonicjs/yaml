@@ -160,6 +160,10 @@ func TestPlainString(t *testing.T) {
 	expectEqual(t, y(t, "a: hello world"), map[string]any{"a": "hello world"})
 }
 
+func TestPlainStringWithDoubleCurlyBraces(t *testing.T) {
+	expectEqual(t, y(t, "foo: a{{q}}b"), map[string]any{"foo": "a{{q}}b"})
+}
+
 func TestOctalNumber(t *testing.T) {
 	expectEqual(t, y(t, "a: 0o77"), map[string]any{"a": float64(63)})
 }
@@ -254,6 +258,14 @@ func TestQuotedBooleanStaysString(t *testing.T) {
 	expectEqual(t, y(t, `a: "true"`), map[string]any{"a": "true"})
 }
 
+func TestSingleQuotedWithDoubleCurlyBraces(t *testing.T) {
+	expectEqual(t, y(t, `foo: 'a{{q}}b'`), map[string]any{"foo": "a{{q}}b"})
+}
+
+func TestDoubleQuotedWithDoubleCurlyBraces(t *testing.T) {
+	expectEqual(t, y(t, `foo: "a{{q}}b"`), map[string]any{"foo": "a{{q}}b"})
+}
+
 // ===== BLOCK SCALARS =====
 
 func TestLiteralBlock(t *testing.T) {
@@ -289,6 +301,18 @@ func TestFoldedBlockKeep(t *testing.T) {
 func TestLiteralBlockPreservesInnerIndent(t *testing.T) {
 	expectEqual(t, y(t, "a: |\n  line1\n    indented\n  line3"),
 		map[string]any{"a": "line1\n  indented\nline3\n"})
+}
+
+func TestLiteralBlockCSVExamplePreservedVerbatim(t *testing.T) {
+	expectEqual(t, y(t, "schema:\n  example: |\n    \"clickId\",\"date\",\"placementId\",\"market\",\"merchantId\",\"merchantName\",\"revenue\",\"currency\"\n    \"532f889fd3ba56f628f3234647d9854650534789938b7fdaafddf1d75081fadc\",\"2018-01-01T00:00:01+00:00\",\"your-custom-placement-id-1\",\"de\",\"583c1b14c50391777b40ee033a04cef033271e35307f7276125b2ba760d4b48e\",\"example.com\",\"0.142898\",\"EUR\"\n    \"ae7facb00d557e7d92e1d2ee31bc05cc9787bc6802e636ccb284cfbaeb6680b8\",\"2018-01-01T00:00:02+00:00\",\"your-custom-placement-id-2\",\"de\",\"583c1b14c50391777b40ee033a04cef033271e35307f7276125b2ba760d4b48e\",\"example.com\",\"0.142825\",\"EUR\"\n    \"8bc875e7f5260fa14b21797508b9e47ee2df2c2fe0351b88edded847ee59bb1f\",\"2018-01-01T00:00:03+00:00\",\"your-custom-placement-id-3\",\"de\",\"583c1b14c50391777b40ee033a04cef033271e35307f7276125b2ba760d4b48e\",\"example.com\",\"0.120417\",\"EUR\""),
+		map[string]any{
+			"schema": map[string]any{
+				"example": "\"clickId\",\"date\",\"placementId\",\"market\",\"merchantId\",\"merchantName\",\"revenue\",\"currency\"\n" +
+					"\"532f889fd3ba56f628f3234647d9854650534789938b7fdaafddf1d75081fadc\",\"2018-01-01T00:00:01+00:00\",\"your-custom-placement-id-1\",\"de\",\"583c1b14c50391777b40ee033a04cef033271e35307f7276125b2ba760d4b48e\",\"example.com\",\"0.142898\",\"EUR\"\n" +
+					"\"ae7facb00d557e7d92e1d2ee31bc05cc9787bc6802e636ccb284cfbaeb6680b8\",\"2018-01-01T00:00:02+00:00\",\"your-custom-placement-id-2\",\"de\",\"583c1b14c50391777b40ee033a04cef033271e35307f7276125b2ba760d4b48e\",\"example.com\",\"0.142825\",\"EUR\"\n" +
+					"\"8bc875e7f5260fa14b21797508b9e47ee2df2c2fe0351b88edded847ee59bb1f\",\"2018-01-01T00:00:03+00:00\",\"your-custom-placement-id-3\",\"de\",\"583c1b14c50391777b40ee033a04cef033271e35307f7276125b2ba760d4b48e\",\"example.com\",\"0.120417\",\"EUR\"\n",
+			},
+		})
 }
 
 // ===== FLOW COLLECTIONS =====
