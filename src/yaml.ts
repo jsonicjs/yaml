@@ -39,6 +39,9 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
   // TAG directive handle mappings (e.g. %TAG !! tag:example.com/).
   // When !! is redefined, built-in type conversion is skipped.
   let tagHandles: Record<string, string> = {}
+  // Incremental flow-depth cache for text.check (avoids O(n²) rescan).
+  let _flowDepth = 0
+  let _flowScanPos = 0
 
   // Preprocess flow collections for YAML-specific features.
   // Transforms flow collection content to be Jsonic-compatible:
@@ -327,7 +330,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
     text: {
       check: (lex: any) => {
         let pnt = lex.pnt
-        let fwd = lex.src.substring(pnt.sI)
+        let fwd = lex.fwd
 
         let ch = fwd[0]
         // Block scalar: | or > (with optional chomping indicator)
@@ -705,13 +708,13 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         // Match text to end of line, stopping at `: `, `:\n`, ` #`, or newline.
         // This handles YAML plain scalars with multiline continuation.
         // Detect if we're inside a flow collection (brackets/braces).
-        let inFlowCtx = false
+        // Use incremental scan: only scan from _flowScanPos to pnt.sI.
+        if (pnt.sI < _flowScanPos) { _flowDepth = 0; _flowScanPos = 0 }
         {
-          let depth = 0
-          for (let fi = 0; fi < pnt.sI; fi++) {
+          for (let fi = _flowScanPos; fi < pnt.sI; fi++) {
             let fc = lex.src[fi]
-            if (fc === '{' || fc === '[') depth++
-            else if (fc === '}' || fc === ']') { if (depth > 0) depth-- }
+            if (fc === '{' || fc === '[') _flowDepth++
+            else if (fc === '}' || fc === ']') { if (_flowDepth > 0) _flowDepth-- }
             else if (fc === '"') {
               fi++; while (fi < pnt.sI && lex.src[fi] !== '"') { if (lex.src[fi] === '\\') fi++; fi++ }
             }
@@ -719,8 +722,9 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               fi++; while (fi < pnt.sI && lex.src[fi] !== "'") { if (lex.src[fi] === "'" && lex.src[fi+1] === "'") fi++; fi++ }
             }
           }
-          inFlowCtx = depth > 0
+          _flowScanPos = pnt.sI
         }
+        let inFlowCtx = _flowDepth > 0
         // Find key indent and determine context for multiline scalars.
         let lineStart = pnt.sI
         while (lineStart > 0 && lex.src[lineStart - 1] !== '\n' && lex.src[lineStart - 1] !== '\r') lineStart--
@@ -1064,6 +1068,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
 
                 lex.src = src
                 lex.pnt.len = src.length
+                lex.refwd()
                 // If source is empty/whitespace/comments-only after preprocessing,
                 // return a VL null token so jsonic resolves to null instead of
                 // creating a #BD error. Only do this when source doesn't start
@@ -1084,7 +1089,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               }
 
               let pnt = lex.pnt
-              let fwd = lex.src.substring(pnt.sI)
+              let fwd = lex.fwd
 
               // Loop to restart matching after consuming flow whitespace.
               yamlMatchLoop: while (true) {
@@ -1099,7 +1104,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   pnt.sI += skip
                   pnt.rI++
                   pnt.cI = 0
-                  fwd = lex.src.substring(pnt.sI)
+                  fwd = lex.refwd()
                   continue yamlMatchLoop
                 }
               }
@@ -1201,7 +1206,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 // For inline anchors before scalar values, record the anchor
                 // immediately so aliases in later pairs can resolve them.
                 if (anchorInline) {
-                  let peek = lex.src.substring(pnt.sI)
+                  let peek = lex.refwd()
                   let pch = peek[0]
                   if (pch !== '[' && pch !== '{' && pch !== '>' && pch !== '|' &&
                       pch !== '\n' && pch !== '\r' && pch !== undefined) {
@@ -1262,7 +1267,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   }
                 }
                 // Update fwd and continue matching.
-                fwd = lex.src.substring(pnt.sI)
+                fwd = lex.refwd()
                 continue yamlMatchLoop
               }
 
@@ -1286,7 +1291,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 }
                 pnt.sI += pos
                 pnt.cI = 0
-                fwd = lex.src.substring(pnt.sI)
+                fwd = lex.refwd()
                 // Fall through — next thing should be --- or content.
               }
 
@@ -1339,7 +1344,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                     pnt.rI++
                   }
                 }
-                fwd = lex.src.substring(pnt.sI)
+                fwd = lex.refwd()
                 // Restart matching to parse the value.
                 continue yamlMatchLoop
               }
@@ -1379,7 +1384,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                       pnt.sI += skip
                       pnt.cI = spaces
                       pnt.rI++
-                      fwd = lex.src.substring(pnt.sI)
+                      fwd = lex.refwd()
                       continue yamlMatchLoop
                     }
                   }
@@ -1387,7 +1392,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 pnt.sI += skip
                 pnt.cI += skip
                 // Don't return a token — let the next lex cycle see the actual value.
-                fwd = lex.src.substring(pnt.sI)
+                fwd = lex.refwd()
                 continue yamlMatchLoop
               }
 
@@ -1455,7 +1460,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   pnt.sI += nl
                   pnt.cI = 0
                   pnt.rI++
-                  fwd = lex.src.substring(pnt.sI)
+                  fwd = lex.refwd()
                   continue yamlMatchLoop
                 }
                 // Unquoted: stop at `: `, ` #`, newline, flow indicators.
@@ -1702,7 +1707,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                     // Content after --- (e.g. --- |, --- "foo", --- text)
                     pnt.sI += afterDash
                     pnt.cI = afterDash
-                    fwd = lex.src.substring(pnt.sI)
+                    fwd = lex.refwd()
                     // Fall through to continue matching.
                   } else {
                     // Plain --- with nothing (or just a comment) after it.
@@ -1726,13 +1731,13 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                     let nextCh = lex.src[pnt.sI]
                     if (nextCh === '{' || nextCh === '[' ||
                         nextCh === '"' || nextCh === "'") {
-                      fwd = lex.src.substring(pnt.sI)
+                      fwd = lex.refwd()
                       // Fall through to continue matching.
                     } else if (spaces === 0 && nextCh !== '-' && nextCh !== '.' &&
                                nextCh !== '?' && nextCh !== '\n' && nextCh !== '\r') {
                       // For indent 0 with simple content (not list/map),
                       // skip #IN and fall through directly to content.
-                      fwd = lex.src.substring(pnt.sI)
+                      fwd = lex.refwd()
                       // Fall through to continue matching.
                     } else {
                       // Emit #IN with the indent level after ---.
@@ -1762,7 +1767,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 }
                 pnt.sI += pos
                 pnt.cI = 0
-                fwd = lex.src.substring(pnt.sI)
+                fwd = lex.refwd()
               }
               // Non-specific tag.
               if (fwd[0] === '!' && fwd[1] === ' ') {
@@ -1789,7 +1794,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 pnt.sI += skip
                 pnt.cI += skip
                 pendingAnchors.push({ name: anchorName, inline: true })
-                fwd = lex.src.substring(pnt.sI)
+                fwd = lex.refwd()
               }
 
               // YAML double-quoted string: backslash escapes + multiline folding.
@@ -2020,11 +2025,12 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               // In flow context, newlines are just whitespace — don't emit #IN.
               // Detect flow context by counting unmatched brackets before current position.
               if (fwd[0] === '\n' || fwd[0] === '\r') {
-                let inFlow = 0
-                for (let fi = 0; fi < pnt.sI; fi++) {
+                // Reuse incremental flow-depth cache.
+                if (pnt.sI < _flowScanPos) { _flowDepth = 0; _flowScanPos = 0 }
+                for (let fi = _flowScanPos; fi < pnt.sI; fi++) {
                   let fc = lex.src[fi]
-                  if (fc === '{' || fc === '[') inFlow++
-                  else if (fc === '}' || fc === ']') { if (inFlow > 0) inFlow-- }
+                  if (fc === '{' || fc === '[') _flowDepth++
+                  else if (fc === '}' || fc === ']') { if (_flowDepth > 0) _flowDepth-- }
                   else if (fc === '"') {
                     fi++
                     while (fi < pnt.sI && lex.src[fi] !== '"') {
@@ -2040,7 +2046,8 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                     }
                   }
                 }
-                if (inFlow > 0) {
+                _flowScanPos = pnt.sI
+                if (_flowDepth > 0) {
                   // Inside flow collection — consume whitespace, don't emit #IN.
                   let pos = 0
                   while (pos < fwd.length &&
@@ -2054,7 +2061,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   pnt.sI += pos
                   pnt.cI = 0
                   // Re-run yamlMatcher from new position.
-                  fwd = lex.src.substring(pnt.sI)
+                  fwd = lex.refwd()
                   continue yamlMatchLoop
                 }
               }
