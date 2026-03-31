@@ -1,7 +1,7 @@
 /* Copyright (c) 2021-2025 Richard Rodger and other contributors, MIT License */
 
 import { test, describe } from 'node:test'
-import { expect } from '@hapi/code'
+import assert from 'node:assert'
 
 import { Jsonic } from 'jsonic'
 import { Yaml } from '../dist/yaml'
@@ -17,7 +17,7 @@ function y(src: string) {
 describe('yaml', () => {
 
   test('happy', () => {
-    expect(y(`a: 1
+    assert.deepEqual(y(`a: 1
 b: 2
 c:
   d: 3
@@ -25,7 +25,7 @@ c:
   f:
   - g
   - h
-`)).equal({ a: 1, b: 2, c: { d: 3, e: 4, f: ['g', 'h'] } })
+`), { a: 1, b: 2, c: { d: 3, e: 4, f: ['g', 'h'] } })
   })
 
 
@@ -34,28 +34,28 @@ c:
   describe('block-mappings', () => {
 
     test('single-pair', () => {
-      expect(y(`a: 1`)).equal({ a: 1 })
+      assert.deepEqual(y(`a: 1`), { a: 1 })
     })
 
     test('multiple-pairs', () => {
-      expect(y(`a: 1\nb: 2\nc: 3`)).equal({ a: 1, b: 2, c: 3 })
+      assert.deepEqual(y(`a: 1\nb: 2\nc: 3`), { a: 1, b: 2, c: 3 })
     })
 
     test('nested-map', () => {
-      expect(y(`a:\n  b: 1\n  c: 2`)).equal({ a: { b: 1, c: 2 } })
+      assert.deepEqual(y(`a:\n  b: 1\n  c: 2`), { a: { b: 1, c: 2 } })
     })
 
     test('deeply-nested-map', () => {
-      expect(y(`a:\n  b:\n    c:\n      d: 1`)).equal({ a: { b: { c: { d: 1 } } } })
+      assert.deepEqual(y(`a:\n  b:\n    c:\n      d: 1`), { a: { b: { c: { d: 1 } } } })
     })
 
     test('sibling-nested-maps', () => {
-      expect(y(`a:\n  x: 1\nb:\n  y: 2`)).equal({ a: { x: 1 }, b: { y: 2 } })
+      assert.deepEqual(y(`a:\n  x: 1\nb:\n  y: 2`), { a: { x: 1 }, b: { y: 2 } })
     })
 
     test('empty-value-followed-by-sibling', () => {
       // key with colon-newline but no nested content, then sibling
-      expect(y(`a:\nb: 1`)).equal({ a: null, b: 1 })
+      assert.deepEqual(y(`a:\nb: 1`), { a: null, b: 1 })
     })
 
     test('colon-space-required', () => {
@@ -64,21 +64,21 @@ c:
       let result: any
       try { result = y(`a:b`) } catch (e: any) { result = 'ERROR' }
       // Record whatever happens — this is a baseline
-      expect(result).exist()
+      assert.ok(result != null)
     })
 
     test('colon-at-end-of-line', () => {
-      expect(y(`a:\n  b: 1`)).equal({ a: { b: 1 } })
+      assert.deepEqual(y(`a:\n  b: 1`), { a: { b: 1 } })
     })
 
     test('trailing-newline', () => {
-      expect(y(`a: 1\n`)).equal({ a: 1 })
+      assert.deepEqual(y(`a: 1\n`), { a: 1 })
     })
 
     test('multiple-trailing-newlines', () => {
       let result: any
       try { result = y(`a: 1\n\n\n`) } catch (e: any) { result = 'ERROR' }
-      expect(result).exist()
+      assert.ok(result != null)
     })
   })
 
@@ -88,43 +88,43 @@ c:
   describe('block-sequences', () => {
 
     test('simple-list', () => {
-      expect(y(`- a\n- b\n- c`)).equal(['a', 'b', 'c'])
+      assert.deepEqual(y(`- a\n- b\n- c`), ['a', 'b', 'c'])
     })
 
     test('single-element', () => {
-      expect(y(`- a`)).equal(['a'])
+      assert.deepEqual(y(`- a`), ['a'])
     })
 
     test('nested-list-in-map', () => {
-      expect(y(`items:\n  - a\n  - b`)).equal({ items: ['a', 'b'] })
+      assert.deepEqual(y(`items:\n  - a\n  - b`), { items: ['a', 'b'] })
     })
 
     test('list-of-numbers', () => {
-      expect(y(`- 1\n- 2\n- 3`)).equal([1, 2, 3])
+      assert.deepEqual(y(`- 1\n- 2\n- 3`), [1, 2, 3])
     })
 
     test('list-of-maps', () => {
       // - key: val  (dash followed by key-value pair)
-      expect(y(`- name: alice\n- name: bob`)).equal([{ name: 'alice' }, { name: 'bob' }])
+      assert.deepEqual(y(`- name: alice\n- name: bob`), [{ name: 'alice' }, { name: 'bob' }])
     })
 
     test('nested-list-of-maps-multikey', () => {
-      expect(y(`items:\n  - name: alice\n    age: 30\n  - name: bob\n    age: 25`))
-        .equal({ items: [{ name: 'alice', age: 30 }, { name: 'bob', age: 25 }] })
+      assert.deepEqual(y(`items:\n  - name: alice\n    age: 30\n  - name: bob\n    age: 25`),
+        { items: [{ name: 'alice', age: 30 }, { name: 'bob', age: 25 }] })
     })
 
     test('list-of-lists', () => {
       // Nested sequences: - - item
-      expect(y(`- - a\n  - b\n- - c\n  - d`)).equal([['a', 'b'], ['c', 'd']])
+      assert.deepEqual(y(`- - a\n  - b\n- - c\n  - d`), [['a', 'b'], ['c', 'd']])
     })
 
     test('deeply-nested-list', () => {
-      expect(y(`a:\n  b:\n    - x\n    - y`)).equal({ a: { b: ['x', 'y'] } })
+      assert.deepEqual(y(`a:\n  b:\n    - x\n    - y`), { a: { b: ['x', 'y'] } })
     })
 
     test('mixed-map-then-list', () => {
-      expect(y(`a: 1\nb:\n  - x\n  - y\nc: 3`))
-        .equal({ a: 1, b: ['x', 'y'], c: 3 })
+      assert.deepEqual(y(`a: 1\nb:\n  - x\n  - y\nc: 3`),
+        { a: 1, b: ['x', 'y'], c: 3 })
     })
   })
 
@@ -134,108 +134,108 @@ c:
   describe('scalar-types', () => {
 
     test('integer', () => {
-      expect(y(`a: 42`)).equal({ a: 42 })
+      assert.deepEqual(y(`a: 42`), { a: 42 })
     })
 
     test('negative-integer', () => {
-      expect(y(`a: -7`)).equal({ a: -7 })
+      assert.deepEqual(y(`a: -7`), { a: -7 })
     })
 
     test('float', () => {
-      expect(y(`a: 3.14`)).equal({ a: 3.14 })
+      assert.deepEqual(y(`a: 3.14`), { a: 3.14 })
     })
 
     test('negative-float', () => {
-      expect(y(`a: -2.5`)).equal({ a: -2.5 })
+      assert.deepEqual(y(`a: -2.5`), { a: -2.5 })
     })
 
     test('zero', () => {
-      expect(y(`a: 0`)).equal({ a: 0 })
+      assert.deepEqual(y(`a: 0`), { a: 0 })
     })
 
     test('boolean-true', () => {
-      expect(y(`a: true`)).equal({ a: true })
+      assert.deepEqual(y(`a: true`), { a: true })
     })
 
     test('boolean-false', () => {
-      expect(y(`a: false`)).equal({ a: false })
+      assert.deepEqual(y(`a: false`), { a: false })
     })
 
     test('null-keyword', () => {
-      expect(y(`a: null`)).equal({ a: null })
+      assert.deepEqual(y(`a: null`), { a: null })
     })
 
     test('tilde-null', () => {
       // YAML allows ~ as null
-      expect(y(`a: ~`)).equal({ a: null })
+      assert.deepEqual(y(`a: ~`), { a: null })
     })
 
     test('empty-value-null', () => {
       // Empty value after colon should be null/undefined
-      expect(y(`a:`)).equal({ a: null })
+      assert.deepEqual(y(`a:`), { a: null })
     })
 
     test('plain-string', () => {
-      expect(y(`a: hello world`)).equal({ a: 'hello world' })
+      assert.deepEqual(y(`a: hello world`), { a: 'hello world' })
     })
 
     test('string-with-special-chars', () => {
-      expect(y(`a: hello, world!`)).equal({ a: 'hello, world!' })
+      assert.deepEqual(y(`a: hello, world!`), { a: 'hello, world!' })
     })
 
     test('plain-string-with-double-curly-braces', () => {
-      expect(y(`foo: a{{q}}b`)).equal({ foo: 'a{{q}}b' })
+      assert.deepEqual(y(`foo: a{{q}}b`), { foo: 'a{{q}}b' })
     })
 
     test('octal-number', () => {
       // YAML 1.2: 0o77 = 63
-      expect(y(`a: 0o77`)).equal({ a: 63 })
+      assert.deepEqual(y(`a: 0o77`), { a: 63 })
     })
 
     test('hex-number', () => {
       // YAML 1.2: 0xFF = 255
-      expect(y(`a: 0xFF`)).equal({ a: 255 })
+      assert.deepEqual(y(`a: 0xFF`), { a: 255 })
     })
 
     test('positive-infinity', () => {
-      expect(y(`a: .inf`)).equal({ a: Infinity })
+      assert.deepEqual(y(`a: .inf`), { a: Infinity })
     })
 
     test('negative-infinity', () => {
-      expect(y(`a: -.inf`)).equal({ a: -Infinity })
+      assert.deepEqual(y(`a: -.inf`), { a: -Infinity })
     })
 
     test('nan', () => {
       let result = y(`a: .nan`)
-      expect(Number.isNaN(result.a)).equal(true)
+      assert.deepEqual(Number.isNaN(result.a), true)
     })
 
     test('yes-boolean', () => {
       // YAML 1.1 allows yes/no as booleans
-      expect(y(`a: yes`)).equal({ a: true })
+      assert.deepEqual(y(`a: yes`), { a: true })
     })
 
     test('no-boolean', () => {
-      expect(y(`a: no`)).equal({ a: false })
+      assert.deepEqual(y(`a: no`), { a: false })
     })
 
     test('on-boolean', () => {
-      expect(y(`a: on`)).equal({ a: true })
+      assert.deepEqual(y(`a: on`), { a: true })
     })
 
     test('off-boolean', () => {
-      expect(y(`a: off`)).equal({ a: false })
+      assert.deepEqual(y(`a: off`), { a: false })
     })
 
     test('timestamp-date', () => {
       // YAML supports dates — should parse as string or Date
       let result = y(`a: 2024-01-15`)
-      expect(result.a).exist()
+      assert.ok(result.a != null)
     })
 
     test('timestamp-datetime', () => {
       let result = y(`a: 2024-01-15T10:30:00Z`)
-      expect(result.a).exist()
+      assert.ok(result.a != null)
     })
   })
 
@@ -245,60 +245,60 @@ c:
   describe('quoted-strings', () => {
 
     test('double-quoted', () => {
-      expect(y(`a: "hello"`)).equal({ a: 'hello' })
+      assert.deepEqual(y(`a: "hello"`), { a: 'hello' })
     })
 
     test('single-quoted', () => {
-      expect(y(`a: 'hello'`)).equal({ a: 'hello' })
+      assert.deepEqual(y(`a: 'hello'`), { a: 'hello' })
     })
 
     test('double-quoted-with-colon', () => {
-      expect(y(`a: "key: value"`)).equal({ a: 'key: value' })
+      assert.deepEqual(y(`a: "key: value"`), { a: 'key: value' })
     })
 
     test('single-quoted-with-colon', () => {
-      expect(y(`a: 'key: value'`)).equal({ a: 'key: value' })
+      assert.deepEqual(y(`a: 'key: value'`), { a: 'key: value' })
     })
 
     test('double-quoted-with-newline-escape', () => {
-      expect(y(`a: "line1\\nline2"`)).equal({ a: 'line1\nline2' })
+      assert.deepEqual(y(`a: "line1\\nline2"`), { a: 'line1\nline2' })
     })
 
     test('double-quoted-with-tab-escape', () => {
-      expect(y(`a: "col1\\tcol2"`)).equal({ a: 'col1\tcol2' })
+      assert.deepEqual(y(`a: "col1\\tcol2"`), { a: 'col1\tcol2' })
     })
 
     test('single-quoted-no-escapes', () => {
       // Single-quoted strings don't process escapes in YAML
-      expect(y(`a: 'line1\\nline2'`)).equal({ a: 'line1\\nline2' })
+      assert.deepEqual(y(`a: 'line1\\nline2'`), { a: 'line1\\nline2' })
     })
 
     test('single-quoted-with-double-curly-braces', () => {
-      expect(y(`foo: 'a{{q}}b'`)).equal({ foo: 'a{{q}}b' })
+      assert.deepEqual(y(`foo: 'a{{q}}b'`), { foo: 'a{{q}}b' })
     })
 
     test('double-quoted-with-double-curly-braces', () => {
-      expect(y(`foo: "a{{q}}b"`)).equal({ foo: 'a{{q}}b' })
+      assert.deepEqual(y(`foo: "a{{q}}b"`), { foo: 'a{{q}}b' })
     })
 
     test('double-quoted-empty', () => {
-      expect(y(`a: ""`)).equal({ a: '' })
+      assert.deepEqual(y(`a: ""`), { a: '' })
     })
 
     test('single-quoted-empty', () => {
-      expect(y(`a: ''`)).equal({ a: '' })
+      assert.deepEqual(y(`a: ''`), { a: '' })
     })
 
     test('quoted-key', () => {
-      expect(y(`"a b": 1`)).equal({ 'a b': 1 })
+      assert.deepEqual(y(`"a b": 1`), { 'a b': 1 })
     })
 
     test('quoted-number-stays-string', () => {
-      expect(y(`a: "42"`)).equal({ a: '42' })
+      assert.deepEqual(y(`a: "42"`), { a: '42' })
     })
 
     test('quoted-boolean-stays-string', () => {
-      expect(y(`a: "true"`)).equal({ a: 'true' })
+      assert.deepEqual(y(`a: "true"`), { a: 'true' })
     })
   })
 
@@ -309,56 +309,56 @@ c:
 
     test('literal-block', () => {
       // | preserves newlines
-      expect(y(`a: |\n  line1\n  line2\n  line3`))
-        .equal({ a: 'line1\nline2\nline3\n' })
+      assert.deepEqual(y(`a: |\n  line1\n  line2\n  line3`),
+        { a: 'line1\nline2\nline3\n' })
     })
 
     test('literal-block-strip', () => {
       // |- strips trailing newline
-      expect(y(`a: |-\n  line1\n  line2`))
-        .equal({ a: 'line1\nline2' })
+      assert.deepEqual(y(`a: |-\n  line1\n  line2`),
+        { a: 'line1\nline2' })
     })
 
     test('literal-block-keep', () => {
       // |+ keeps trailing newlines
-      expect(y(`a: |+\n  line1\n  line2\n\n`))
-        .equal({ a: 'line1\nline2\n\n' })
+      assert.deepEqual(y(`a: |+\n  line1\n  line2\n\n`),
+        { a: 'line1\nline2\n\n' })
     })
 
     test('folded-block', () => {
       // > folds newlines to spaces
-      expect(y(`a: >\n  line1\n  line2\n  line3`))
-        .equal({ a: 'line1 line2 line3\n' })
+      assert.deepEqual(y(`a: >\n  line1\n  line2\n  line3`),
+        { a: 'line1 line2 line3\n' })
     })
 
     test('folded-block-strip', () => {
-      expect(y(`a: >-\n  line1\n  line2`))
-        .equal({ a: 'line1 line2' })
+      assert.deepEqual(y(`a: >-\n  line1\n  line2`),
+        { a: 'line1 line2' })
     })
 
     test('folded-block-keep', () => {
-      expect(y(`a: >+\n  line1\n  line2\n\n`))
-        .equal({ a: 'line1 line2\n\n' })
+      assert.deepEqual(y(`a: >+\n  line1\n  line2\n\n`),
+        { a: 'line1 line2\n\n' })
     })
 
     test('literal-block-with-indent', () => {
-      expect(y(`a:\n  b: |\n    indented\n    text`))
-        .equal({ a: { b: 'indented\ntext\n' } })
+      assert.deepEqual(y(`a:\n  b: |\n    indented\n    text`),
+        { a: { b: 'indented\ntext\n' } })
     })
 
     test('literal-block-preserves-inner-indent', () => {
-      expect(y(`a: |\n  line1\n    indented\n  line3`))
-        .equal({ a: 'line1\n  indented\nline3\n' })
+      assert.deepEqual(y(`a: |\n  line1\n    indented\n  line3`),
+        { a: 'line1\n  indented\nline3\n' })
     })
 
     test('literal-block-csv-example-preserved-verbatim', () => {
-      expect(y(`schema:
+      assert.deepEqual(y(`schema:
   example: |
     "clickId","date","placementId","market","merchantId","merchantName","revenue","currency"
     "532f889fd3ba56f628f3234647d9854650534789938b7fdaafddf1d75081fadc","2018-01-01T00:00:01+00:00","your-custom-placement-id-1","de","583c1b14c50391777b40ee033a04cef033271e35307f7276125b2ba760d4b48e","example.com","0.142898","EUR"
     "ae7facb00d557e7d92e1d2ee31bc05cc9787bc6802e636ccb284cfbaeb6680b8","2018-01-01T00:00:02+00:00","your-custom-placement-id-2","de","583c1b14c50391777b40ee033a04cef033271e35307f7276125b2ba760d4b48e","example.com","0.142825","EUR"
-    "8bc875e7f5260fa14b21797508b9e47ee2df2c2fe0351b88edded847ee59bb1f","2018-01-01T00:00:03+00:00","your-custom-placement-id-3","de","583c1b14c50391777b40ee033a04cef033271e35307f7276125b2ba760d4b48e","example.com","0.120417","EUR"`))
-        .equal({
+    "8bc875e7f5260fa14b21797508b9e47ee2df2c2fe0351b88edded847ee59bb1f","2018-01-01T00:00:03+00:00","your-custom-placement-id-3","de","583c1b14c50391777b40ee033a04cef033271e35307f7276125b2ba760d4b48e","example.com","0.120417","EUR"`),
+        {
           schema: {
             example:
               '"clickId","date","placementId","market","merchantId","merchantName","revenue","currency"\n' +
@@ -376,35 +376,35 @@ c:
   describe('flow-collections', () => {
 
     test('flow-sequence', () => {
-      expect(y(`a: [1, 2, 3]`)).equal({ a: [1, 2, 3] })
+      assert.deepEqual(y(`a: [1, 2, 3]`), { a: [1, 2, 3] })
     })
 
     test('flow-mapping', () => {
-      expect(y(`a: {x: 1, y: 2}`)).equal({ a: { x: 1, y: 2 } })
+      assert.deepEqual(y(`a: {x: 1, y: 2}`), { a: { x: 1, y: 2 } })
     })
 
     test('nested-flow-in-block', () => {
-      expect(y(`a: [1, [2, 3]]`)).equal({ a: [1, [2, 3]] })
+      assert.deepEqual(y(`a: [1, [2, 3]]`), { a: [1, [2, 3]] })
     })
 
     test('flow-map-in-flow-seq', () => {
-      expect(y(`a: [{x: 1}, {y: 2}]`)).equal({ a: [{ x: 1 }, { y: 2 }] })
+      assert.deepEqual(y(`a: [{x: 1}, {y: 2}]`), { a: [{ x: 1 }, { y: 2 }] })
     })
 
     test('empty-flow-sequence', () => {
-      expect(y(`a: []`)).equal({ a: [] })
+      assert.deepEqual(y(`a: []`), { a: [] })
     })
 
     test('empty-flow-mapping', () => {
-      expect(y(`a: {}`)).equal({ a: {} })
+      assert.deepEqual(y(`a: {}`), { a: {} })
     })
 
     test('flow-at-top-level-seq', () => {
-      expect(y(`[1, 2, 3]`)).equal([1, 2, 3])
+      assert.deepEqual(y(`[1, 2, 3]`), [1, 2, 3])
     })
 
     test('flow-at-top-level-map', () => {
-      expect(y(`{a: 1, b: 2}`)).equal({ a: 1, b: 2 })
+      assert.deepEqual(y(`{a: 1, b: 2}`), { a: 1, b: 2 })
     })
   })
 
@@ -414,27 +414,27 @@ c:
   describe('comments', () => {
 
     test('line-comment', () => {
-      expect(y(`a: 1 # comment\nb: 2`)).equal({ a: 1, b: 2 })
+      assert.deepEqual(y(`a: 1 # comment\nb: 2`), { a: 1, b: 2 })
     })
 
     test('full-line-comment', () => {
-      expect(y(`# this is a comment\na: 1`)).equal({ a: 1 })
+      assert.deepEqual(y(`# this is a comment\na: 1`), { a: 1 })
     })
 
     test('comment-after-key', () => {
-      expect(y(`a: # comment\n  b: 1`)).equal({ a: { b: 1 } })
+      assert.deepEqual(y(`a: # comment\n  b: 1`), { a: { b: 1 } })
     })
 
     test('multiple-comments', () => {
-      expect(y(`# first\na: 1\n# second\nb: 2`)).equal({ a: 1, b: 2 })
+      assert.deepEqual(y(`# first\na: 1\n# second\nb: 2`), { a: 1, b: 2 })
     })
 
     test('comment-in-list', () => {
-      expect(y(`- a # comment\n- b`)).equal(['a', 'b'])
+      assert.deepEqual(y(`- a # comment\n- b`), ['a', 'b'])
     })
 
     test('comment-only-line-between-pairs', () => {
-      expect(y(`a: 1\n# middle\nb: 2`)).equal({ a: 1, b: 2 })
+      assert.deepEqual(y(`a: 1\n# middle\nb: 2`), { a: 1, b: 2 })
     })
   })
 
@@ -444,22 +444,22 @@ c:
   describe('anchors-aliases', () => {
 
     test('simple-anchor-alias', () => {
-      expect(y(`a: &ref hello\nb: *ref`)).equal({ a: 'hello', b: 'hello' })
+      assert.deepEqual(y(`a: &ref hello\nb: *ref`), { a: 'hello', b: 'hello' })
     })
 
     test('anchor-on-map', () => {
-      expect(y(`defaults: &defaults\n  x: 1\n  y: 2\noverride:\n  <<: *defaults\n  y: 3`))
-        .equal({ defaults: { x: 1, y: 2 }, override: { x: 1, y: 3 } })
+      assert.deepEqual(y(`defaults: &defaults\n  x: 1\n  y: 2\noverride:\n  <<: *defaults\n  y: 3`),
+        { defaults: { x: 1, y: 2 }, override: { x: 1, y: 3 } })
     })
 
     test('anchor-on-sequence', () => {
-      expect(y(`a: &items\n  - 1\n  - 2\nb: *items`))
-        .equal({ a: [1, 2], b: [1, 2] })
+      assert.deepEqual(y(`a: &items\n  - 1\n  - 2\nb: *items`),
+        { a: [1, 2], b: [1, 2] })
     })
 
     test('multiple-aliases', () => {
-      expect(y(`a: &x 10\nb: &y 20\nc: *x\nd: *y`))
-        .equal({ a: 10, b: 20, c: 10, d: 20 })
+      assert.deepEqual(y(`a: &x 10\nb: &y 20\nc: *x\nd: *y`),
+        { a: 10, b: 20, c: 10, d: 20 })
     })
   })
 
@@ -469,18 +469,18 @@ c:
   describe('merge-key', () => {
 
     test('simple-merge', () => {
-      expect(y(`defaults: &d\n  a: 1\n  b: 2\nresult:\n  <<: *d\n  c: 3`))
-        .equal({ defaults: { a: 1, b: 2 }, result: { a: 1, b: 2, c: 3 } })
+      assert.deepEqual(y(`defaults: &d\n  a: 1\n  b: 2\nresult:\n  <<: *d\n  c: 3`),
+        { defaults: { a: 1, b: 2 }, result: { a: 1, b: 2, c: 3 } })
     })
 
     test('merge-override', () => {
-      expect(y(`base: &b\n  x: 1\n  y: 2\nchild:\n  <<: *b\n  y: 99`))
-        .equal({ base: { x: 1, y: 2 }, child: { x: 1, y: 99 } })
+      assert.deepEqual(y(`base: &b\n  x: 1\n  y: 2\nchild:\n  <<: *b\n  y: 99`),
+        { base: { x: 1, y: 2 }, child: { x: 1, y: 99 } })
     })
 
     test('merge-multiple', () => {
-      expect(y(`a: &a\n  x: 1\nb: &b\n  y: 2\nc:\n  <<: [*a, *b]\n  z: 3`))
-        .equal({ a: { x: 1 }, b: { y: 2 }, c: { x: 1, y: 2, z: 3 } })
+      assert.deepEqual(y(`a: &a\n  x: 1\nb: &b\n  y: 2\nc:\n  <<: [*a, *b]\n  z: 3`),
+        { a: { x: 1 }, b: { y: 2 }, c: { x: 1, y: 2, z: 3 } })
     })
   })
 
@@ -490,18 +490,18 @@ c:
   describe('multi-document', () => {
 
     test('document-start-marker', () => {
-      expect(y(`---\na: 1`)).equal({ a: 1 })
+      assert.deepEqual(y(`---\na: 1`), { a: 1 })
     })
 
     test('document-end-marker', () => {
-      expect(y(`a: 1\n...`)).equal({ a: 1 })
+      assert.deepEqual(y(`a: 1\n...`), { a: 1 })
     })
 
     test('multiple-documents', () => {
       // Parser may only return first document or throw
       let result: any
       try { result = y(`---\na: 1\n---\nb: 2`) } catch (e: any) { result = 'ERROR' }
-      expect(result).exist()
+      assert.ok(result != null)
     })
   })
 
@@ -511,31 +511,31 @@ c:
   describe('tags', () => {
 
     test('explicit-string-tag', () => {
-      expect(y(`a: !!str 42`)).equal({ a: '42' })
+      assert.deepEqual(y(`a: !!str 42`), { a: '42' })
     })
 
     test('explicit-int-tag', () => {
-      expect(y(`a: !!int "42"`)).equal({ a: 42 })
+      assert.deepEqual(y(`a: !!int "42"`), { a: 42 })
     })
 
     test('explicit-float-tag', () => {
-      expect(y(`a: !!float "3.14"`)).equal({ a: 3.14 })
+      assert.deepEqual(y(`a: !!float "3.14"`), { a: 3.14 })
     })
 
     test('explicit-bool-tag', () => {
-      expect(y(`a: !!bool "true"`)).equal({ a: true })
+      assert.deepEqual(y(`a: !!bool "true"`), { a: true })
     })
 
     test('explicit-null-tag', () => {
-      expect(y(`a: !!null ""`)).equal({ a: null })
+      assert.deepEqual(y(`a: !!null ""`), { a: null })
     })
 
     test('explicit-seq-tag', () => {
-      expect(y(`a: !!seq\n  - 1\n  - 2`)).equal({ a: [1, 2] })
+      assert.deepEqual(y(`a: !!seq\n  - 1\n  - 2`), { a: [1, 2] })
     })
 
     test('explicit-map-tag', () => {
-      expect(y(`a: !!map\n  x: 1`)).equal({ a: { x: 1 } })
+      assert.deepEqual(y(`a: !!map\n  x: 1`), { a: { x: 1 } })
     })
   })
 
@@ -546,15 +546,15 @@ c:
 
     test('explicit-key', () => {
       // ? marks an explicit key
-      expect(y(`? a\n: 1`)).equal({ a: 1 })
+      assert.deepEqual(y(`? a\n: 1`), { a: 1 })
     })
 
     test('multiline-key', () => {
-      expect(y(`? a b\n: 1`)).equal({ 'a b': 1 })
+      assert.deepEqual(y(`? a b\n: 1`), { 'a b': 1 })
     })
 
     test('numeric-key', () => {
-      expect(y(`1: one\n2: two`)).equal({ 1: 'one', 2: 'two' })
+      assert.deepEqual(y(`1: one\n2: two`), { 1: 'one', 2: 'two' })
     })
   })
 
@@ -566,13 +566,13 @@ c:
     test('yaml-directive', () => {
       let result: any
       try { result = y(`%YAML 1.2\n---\na: 1`) } catch (e: any) { result = 'ERROR' }
-      expect(result).exist()
+      assert.ok(result != null)
     })
 
     test('tag-directive', () => {
       let result: any
       try { result = y(`%TAG ! tag:example.com,2000:\n---\na: 1`) } catch (e: any) { result = 'ERROR' }
-      expect(result).exist()
+      assert.ok(result != null)
     })
   })
 
@@ -582,55 +582,55 @@ c:
   describe('indentation', () => {
 
     test('two-space-indent', () => {
-      expect(y(`a:\n  b: 1`)).equal({ a: { b: 1 } })
+      assert.deepEqual(y(`a:\n  b: 1`), { a: { b: 1 } })
     })
 
     test('four-space-indent', () => {
-      expect(y(`a:\n    b: 1`)).equal({ a: { b: 1 } })
+      assert.deepEqual(y(`a:\n    b: 1`), { a: { b: 1 } })
     })
 
     test('mixed-indent-levels', () => {
-      expect(y(`a:\n  b:\n      c: 1`)).equal({ a: { b: { c: 1 } } })
+      assert.deepEqual(y(`a:\n  b:\n      c: 1`), { a: { b: { c: 1 } } })
     })
 
     test('return-to-outer-indent', () => {
       // After nested content, return to parent indent level
-      expect(y(`a:\n  b: 1\n  c: 2\nd: 3`)).equal({ a: { b: 1, c: 2 }, d: 3 })
+      assert.deepEqual(y(`a:\n  b: 1\n  c: 2\nd: 3`), { a: { b: 1, c: 2 }, d: 3 })
     })
 
     test('multiple-indent-returns', () => {
-      expect(y(`a:\n  b:\n    c: 1\n  d: 2\ne: 3`))
-        .equal({ a: { b: { c: 1 }, d: 2 }, e: 3 })
+      assert.deepEqual(y(`a:\n  b:\n    c: 1\n  d: 2\ne: 3`),
+        { a: { b: { c: 1 }, d: 2 }, e: 3 })
     })
 
     test('list-indent-under-map', () => {
-      expect(y(`a:\n  - 1\n  - 2\nb: 3`)).equal({ a: [1, 2], b: 3 })
+      assert.deepEqual(y(`a:\n  - 1\n  - 2\nb: 3`), { a: [1, 2], b: 3 })
     })
 
     test('tab-indentation-rejected', () => {
       // YAML spec says tabs are not allowed for indentation
       let result: any
       try { result = y(`a:\n\tb: 1`) } catch (e: any) { result = 'ERROR' }
-      expect(result).exist()
+      assert.ok(result != null)
     })
 
     test('start-of-file-indent', () => {
       // Content starting with indentation (no leading newline)
       let result: any
       try { result = y(`  a: 1`) } catch (e: any) { result = 'ERROR' }
-      expect(result).exist()
+      assert.ok(result != null)
     })
 
     test('blank-lines-between-pairs', () => {
       let result: any
       try { result = y(`a: 1\n\nb: 2`) } catch (e: any) { result = 'ERROR' }
-      expect(result).exist()
+      assert.ok(result != null)
     })
 
     test('blank-lines-in-list', () => {
       let result: any
       try { result = y(`- a\n\n- b`) } catch (e: any) { result = 'ERROR' }
-      expect(result).exist()
+      assert.ok(result != null)
     })
   })
 
@@ -641,12 +641,12 @@ c:
 
     test('continuation-line', () => {
       // In YAML, plain scalars can span multiple lines (folded at same indent)
-      expect(y(`a: this is\n  a long string`)).equal({ a: 'this is a long string' })
+      assert.deepEqual(y(`a: this is\n  a long string`), { a: 'this is a long string' })
     })
 
     test('multiple-continuation-lines', () => {
-      expect(y(`a: line one\n  line two\n  line three`))
-        .equal({ a: 'line one line two line three' })
+      assert.deepEqual(y(`a: line one\n  line two\n  line three`),
+        { a: 'line one line two line three' })
     })
   })
 
@@ -656,15 +656,15 @@ c:
   describe('line-endings', () => {
 
     test('crlf', () => {
-      expect(y(`a: 1\r\nb: 2`)).equal({ a: 1, b: 2 })
+      assert.deepEqual(y(`a: 1\r\nb: 2`), { a: 1, b: 2 })
     })
 
     test('crlf-nested', () => {
-      expect(y(`a:\r\n  b: 1\r\n  c: 2`)).equal({ a: { b: 1, c: 2 } })
+      assert.deepEqual(y(`a:\r\n  b: 1\r\n  c: 2`), { a: { b: 1, c: 2 } })
     })
 
     test('crlf-list', () => {
-      expect(y(`- a\r\n- b`)).equal(['a', 'b'])
+      assert.deepEqual(y(`- a\r\n- b`), ['a', 'b'])
     })
   })
 
@@ -675,31 +675,31 @@ c:
 
     test('value-with-hash-not-comment', () => {
       // In YAML, # must have a space before it to be a comment
-      expect(y(`a: foo#bar`)).equal({ a: 'foo#bar' })
+      assert.deepEqual(y(`a: foo#bar`), { a: 'foo#bar' })
     })
 
     test('value-with-colon-no-space', () => {
       // "http://example.com" - colon not followed by space
       let result: any
       try { result = y(`url: http://example.com`) } catch (e: any) { result = 'ERROR' }
-      expect(result).exist()
+      assert.ok(result != null)
     })
 
     test('key-with-spaces', () => {
-      expect(y(`a long key: value`)).equal({ 'a long key': 'value' })
+      assert.deepEqual(y(`a long key: value`), { 'a long key': 'value' })
     })
 
     test('value-with-brackets', () => {
       // Plain scalar containing brackets
       let result: any
       try { result = y(`a: some [text] here`) } catch (e: any) { result = 'ERROR' }
-      expect(result).exist()
+      assert.ok(result != null)
     })
 
     test('value-with-braces', () => {
       let result: any
       try { result = y(`a: some {text} here`) } catch (e: any) { result = 'ERROR' }
-      expect(result).exist()
+      assert.ok(result != null)
     })
   })
 
@@ -710,18 +710,18 @@ c:
 
     test('compact-notation', () => {
       // - key: val  (most common YAML pattern for lists of objects)
-      expect(y(`- name: alice\n  age: 30\n- name: bob\n  age: 25`))
-        .equal([{ name: 'alice', age: 30 }, { name: 'bob', age: 25 }])
+      assert.deepEqual(y(`- name: alice\n  age: 30\n- name: bob\n  age: 25`),
+        [{ name: 'alice', age: 30 }, { name: 'bob', age: 25 }])
     })
 
     test('single-key-per-element', () => {
-      expect(y(`- a: 1\n- b: 2\n- c: 3`))
-        .equal([{ a: 1 }, { b: 2 }, { c: 3 }])
+      assert.deepEqual(y(`- a: 1\n- b: 2\n- c: 3`),
+        [{ a: 1 }, { b: 2 }, { c: 3 }])
     })
 
     test('nested-in-map', () => {
-      expect(y(`people:\n  - name: alice\n  - name: bob`))
-        .equal({ people: [{ name: 'alice' }, { name: 'bob' }] })
+      assert.deepEqual(y(`people:\n  - name: alice\n  - name: bob`),
+        { people: [{ name: 'alice' }, { name: 'bob' }] })
     })
   })
 
@@ -731,8 +731,8 @@ c:
   describe('real-world', () => {
 
     test('docker-compose-like', () => {
-      expect(y(`version: 3\nservices:\n  web:\n    image: nginx\n    ports:\n      - 80\n      - 443`))
-        .equal({
+      assert.deepEqual(y(`version: 3\nservices:\n  web:\n    image: nginx\n    ports:\n      - 80\n      - 443`),
+        {
           version: 3,
           services: {
             web: {
@@ -744,8 +744,8 @@ c:
     })
 
     test('github-actions-like', () => {
-      expect(y(`name: build\non:\n  push:\n    branches:\n      - main\njobs:\n  test:\n    runs-on: ubuntu`))
-        .equal({
+      assert.deepEqual(y(`name: build\non:\n  push:\n    branches:\n      - main\njobs:\n  test:\n    runs-on: ubuntu`),
+        {
           name: 'build',
           on: { push: { branches: ['main'] } },
           jobs: { test: { 'runs-on': 'ubuntu' } }
@@ -753,8 +753,8 @@ c:
     })
 
     test('kubernetes-like', () => {
-      expect(y(`apiVersion: v1\nkind: Pod\nmetadata:\n  name: myapp\n  labels:\n    app: myapp\nspec:\n  containers:\n    - name: web\n      image: nginx`))
-        .equal({
+      assert.deepEqual(y(`apiVersion: v1\nkind: Pod\nmetadata:\n  name: myapp\n  labels:\n    app: myapp\nspec:\n  containers:\n    - name: web\n      image: nginx`),
+        {
           apiVersion: 'v1',
           kind: 'Pod',
           metadata: { name: 'myapp', labels: { app: 'myapp' } },
@@ -763,16 +763,16 @@ c:
     })
 
     test('ansible-like', () => {
-      expect(y(`- name: install packages\n  become: true\n- name: start service\n  become: false`))
-        .equal([
+      assert.deepEqual(y(`- name: install packages\n  become: true\n- name: start service\n  become: false`),
+        [
           { name: 'install packages', become: true },
           { name: 'start service', become: false }
         ])
     })
 
     test('config-file-like', () => {
-      expect(y(`database:\n  host: localhost\n  port: 5432\n  name: mydb\ncache:\n  enabled: true\n  ttl: 3600`))
-        .equal({
+      assert.deepEqual(y(`database:\n  host: localhost\n  port: 5432\n  name: mydb\ncache:\n  enabled: true\n  ttl: 3600`),
+        {
           database: { host: 'localhost', port: 5432, name: 'mydb' },
           cache: { enabled: true, ttl: 3600 }
         })

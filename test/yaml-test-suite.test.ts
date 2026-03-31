@@ -11,7 +11,7 @@
 // Tests without in.json or error are skipped (no way to validate output).
 
 import { test, describe } from 'node:test'
-import { expect } from '@hapi/code'
+
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 

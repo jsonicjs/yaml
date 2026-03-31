@@ -35,12 +35,10 @@
     "LICENSE"
   ],
   "devDependencies": {
-    "@hapi/code": "^9.0.3",
     "@types/node": "^25.5.0",
     "typescript": "^5.9.3"
   },
   "peerDependencies": {
     "jsonic": ">=2"
-  },
-  "dependencies": {}
+  }
 }
