@@ -42,6 +42,9 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
   // Incremental flow-depth cache for text.check (avoids O(n²) rescan).
   let _flowDepth = 0
   let _flowScanPos = 0
+  // Persistent quote state so multi-call scans handle quotes spanning slices.
+  let _inSingleQuote = false
+  let _inDoubleQuote = false
 
   // Preprocess flow collections for YAML-specific features.
   // Transforms flow collection content to be Jsonic-compatible:
@@ -54,10 +57,35 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
     let i = 0
 
     while (i < src.length) {
+      // Skip over quoted strings so their contents aren't misidentified
+      // as flow collection starts.
+      if (src[i] === '"') {
+        result += src[i]; i++
+        while (i < src.length && src[i] !== '"') {
+          if (src[i] === '\\') { result += src[i]; i++ }
+          result += src[i]; i++
+        }
+        if (i < src.length) { result += src[i]; i++ }
+        continue
+      }
+      if (src[i] === "'") {
+        // Only treat as quote if not preceded by a word char (apostrophe).
+        let pc = i > 0 ? src.charCodeAt(i - 1) : 0
+        if (!((pc >= 65 && pc <= 90) || (pc >= 97 && pc <= 122) || (pc >= 48 && pc <= 57))) {
+          result += src[i]; i++
+          while (i < src.length) {
+            if (src[i] === "'" && src[i + 1] === "'") { result += "''"; i += 2; continue }
+            if (src[i] === "'") break
+            result += src[i]; i++
+          }
+          if (i < src.length) { result += src[i]; i++ }
+          continue
+        }
+      }
       if (src[i] === '{' || src[i] === '[') {
         // Only treat as flow collection if it's at a value position:
         // after start of string, after newline+indent, after ": ", after "- ",
-        // after ",", after "[" or "{", or preceded only by whitespace on its line.
+        // or preceded only by whitespace on its line.
         if (isFlowCollectionStart(src, i)) {
           let processed = processFlowCollection(src, i)
           result += processed.text
@@ -81,11 +109,25 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
     let prev = src[j]
     // After newline: it's a flow collection if it's the first thing on the line.
     if (prev === '\n' || prev === '\r') return true
-    // After value/element/separator indicators.
-    // NOTE: Do NOT treat a preceding "{" or "[" as a flow start signal.
-    // That incorrectly classifies plain scalars such as: a{{q}}b
-    // as nested flow collections.
-    if (prev === ':' || prev === '-' || prev === ',') return true
+    // After value/element indicators.
+    // NOTE: Do NOT treat a preceding "{", "[", or "," as a flow start signal.
+    // "{" and "[" incorrectly classify plain scalars such as: a{{q}}b
+    // "," at top level is plain scalar text (e.g. "text, [link](url)"),
+    // not a flow separator. Nested collections inside processFlowCollection
+    // are handled recursively without this check.
+    if (prev === ':') return true
+    if (prev === '-') {
+      // Only treat as YAML sequence indicator if preceded by whitespace/newline/start.
+      // A hyphen preceded by word characters is part of a word (e.g. deploy-token-{n}).
+      if (j > 0) {
+        let pc = src.charCodeAt(j - 1)
+        if ((pc >= 65 && pc <= 90) || (pc >= 97 && pc <= 122) ||
+            (pc >= 48 && pc <= 57) || pc === 95) {
+          return false
+        }
+      }
+      return true
+    }
     return false
   }
 
@@ -140,6 +182,15 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
       }
 
       if (ch === "'") {
+        // Only treat as YAML quote if not preceded by a word char (apostrophe check).
+        let pc = i > 0 ? src.charCodeAt(i - 1) : 0
+        if ((pc >= 65 && pc <= 90) || (pc >= 97 && pc <= 122) || (pc >= 48 && pc <= 57)) {
+          // Apostrophe — treat as regular character.
+          if (isMap) entryParts.push(ch)
+          else out += ch
+          i++
+          continue
+        }
         let str = "'"
         i++
         while (i < src.length) {
@@ -308,10 +359,10 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
     // Colons can still end unquoted text (TX, lexer.textMatcher).
     ender: ':',
 
-    // Remove single quote from string chars — YAML single-quoted strings
-    // don't process backslash escapes, so we handle them in yamlMatcher.
+    // Remove all jsonic string chars — YAML handles quotes in yamlMatcher.
+    // Backtick is not a string delimiter in YAML.
     string: {
-      chars: '`',
+      chars: '',
     },
 
     // Skip number matching when yamlMatcher detected trailing text
@@ -709,17 +760,31 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         // This handles YAML plain scalars with multiline continuation.
         // Detect if we're inside a flow collection (brackets/braces).
         // Use incremental scan: only scan from _flowScanPos to pnt.sI.
-        if (pnt.sI < _flowScanPos) { _flowDepth = 0; _flowScanPos = 0 }
+        if (pnt.sI < _flowScanPos) { _flowDepth = 0; _flowScanPos = 0; _inSingleQuote = false; _inDoubleQuote = false }
         {
           for (let fi = _flowScanPos; fi < pnt.sI; fi++) {
             let fc = lex.src[fi]
+            if (_inDoubleQuote) {
+              if (fc === '\\') fi++
+              else if (fc === '"') _inDoubleQuote = false
+              continue
+            }
+            if (_inSingleQuote) {
+              if (fc === "'") {
+                if (lex.src[fi + 1] === "'") fi++ // escaped '' in single-quoted string
+                else _inSingleQuote = false
+              }
+              continue
+            }
             if (fc === '{' || fc === '[') _flowDepth++
             else if (fc === '}' || fc === ']') { if (_flowDepth > 0) _flowDepth-- }
-            else if (fc === '"') {
-              fi++; while (fi < pnt.sI && lex.src[fi] !== '"') { if (lex.src[fi] === '\\') fi++; fi++ }
-            }
+            else if (fc === '"') { _inDoubleQuote = true }
             else if (fc === "'") {
-              fi++; while (fi < pnt.sI && lex.src[fi] !== "'") { if (lex.src[fi] === "'" && lex.src[fi+1] === "'") fi++; fi++ }
+              // Only treat as YAML quote if not preceded by a word char (apostrophe check).
+              let pc = fi > 0 ? lex.src.charCodeAt(fi - 1) : 0
+              if (!((pc >= 65 && pc <= 90) || (pc >= 97 && pc <= 122) || (pc >= 48 && pc <= 57))) {
+                _inSingleQuote = true
+              }
             }
           }
           _flowScanPos = pnt.sI
@@ -951,13 +1016,24 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         yaml: {
           order: 5e5,
           make: (_cfg: Config, _opts: Options) => {
-            let srcCleaned = false
+            let cleanedSrc: String | null = null
             return function yamlMatcher(lex: Lex) {
-              // On first call, strip YAML document markers and directives
-              // from lex.src. These must be removed before lexing because
-              // jsonic reverts pnt.sI when a lex matcher returns undefined.
-              if (!srcCleaned) {
-                srcCleaned = true
+              // On first call (or when source changes), strip YAML document
+              // markers and directives from lex.src. These must be removed
+              // before lexing because jsonic reverts pnt.sI when a lex
+              // matcher returns undefined.
+              if (lex.src !== cleanedSrc) {
+                // Reset per-parse state for reused parser instances.
+                anchors = {}
+                pendingAnchors = []
+                pendingExplicitCL = false
+                skipNumberMatch = false
+                pendingTokens = []
+                tagHandles = {}
+                _flowDepth = 0
+                _flowScanPos = 0
+                _inSingleQuote = false
+                _inDoubleQuote = false
                 let src: string = '' + lex.src
                 let hadDirective = false
                 // Remove leading directive block: everything before ---
@@ -984,6 +1060,8 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 while (/^[ \t]*#[^\n]*\n/.test(src) && /\n---/.test(src)) {
                   src = src.replace(/^[ \t]*#[^\n]*\n/, '')
                 }
+                // Strip leading blank lines so --- is at position 0.
+                src = src.replace(/^(\r?\n)+/, '')
                 // Handle document start marker (---).
                 let docMatch = src.match(/^---(?:([ \t]+)(.+))?(\r?\n|$)/)
                 let docStripped = false
@@ -1067,6 +1145,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 src = preprocessFlowCollections(src)
 
                 lex.src = src
+                cleanedSrc = lex.src
                 lex.pnt.len = src.length
                 lex.refwd()
                 // If source is empty/whitespace/comments-only after preprocessing,
@@ -1648,10 +1727,49 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 if (hasValue) {
                   pnt.sI += valConsumed
                   pnt.rI += 1 + extraRows
-                  // Set column to actual position after `: ` on the value line (1-indexed).
-                  pnt.cI = valConsumed - consumed + 1
-                  // Has `: value` — emit KEY now, CL on next call.
-                  pendingExplicitCL = true
+                  let indent = valConsumed - consumed
+                  pnt.cI = indent + 1
+                  // Check if there's inline content after `: ` on the same line
+                  // that looks like a block mapping or sequence (needs #IN context).
+                  let nextCh = fwd[valConsumed]
+                  let hasInlineContent = nextCh !== undefined &&
+                    nextCh !== '\n' && nextCh !== '\r'
+                  let needsIndent = false
+                  if (hasInlineContent) {
+                    let isQuotedOrFlowOrTag = nextCh === '"' || nextCh === "'" ||
+                      nextCh === '[' || nextCh === '{' || nextCh === '!'
+                    if (!isQuotedOrFlowOrTag) {
+                      // Scan line for mapping key indicator (`: ` or `:` at EOL).
+                      let le = valConsumed
+                      while (le < fwd.length && fwd[le] !== '\n' && fwd[le] !== '\r') le++
+                      for (let ri = valConsumed; ri < le; ri++) {
+                        if (fwd[ri] === ':') {
+                          let nc = fwd[ri + 1]
+                          if (nc === ' ' || nc === '\t' || nc === '\n' ||
+                              nc === '\r' || nc === undefined || ri + 1 === le) {
+                            needsIndent = true
+                            break
+                          }
+                        }
+                      }
+                      // Also check for sequence indicator (`- `).
+                      if (!needsIndent && nextCh === '-' &&
+                          (fwd[valConsumed + 1] === ' ' || fwd[valConsumed + 1] === '\t')) {
+                        needsIndent = true
+                      }
+                    }
+                  }
+                  if (needsIndent) {
+                    // Block mapping/sequence inline (e.g., `: get:\n    v: 1`).
+                    // Emit CL then IN to establish indent context.
+                    let clTkn = lex.token('#CL', 1, ': ', lex.pnt)
+                    let inTkn = lex.token('#IN', indent, '', lex.pnt)
+                    pendingTokens.push(clTkn, inTkn)
+                  } else {
+                    // Simple scalar or value on next line.
+                    // Just emit CL; the newline handler will emit IN if needed.
+                    pendingExplicitCL = true
+                  }
                 } else {
                   // No `:` follows — don't consume past newline so the
                   // normal newline→#IN handler can emit indent for map continuation.
@@ -1924,17 +2042,30 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 return tkn
               }
 
-              // Plain scalars starting with digits but containing colons (e.g. 20:03:20)
-              // or non-numeric text after a space (e.g. "64 characters, hexadecimal.")
-              // must be captured before jsonic's number matcher grabs just the digits.
+              // Plain scalars starting with digits but containing colons (e.g. 20:03:20),
+              // trailing commas (e.g. 12,), or non-numeric text after a space
+              // (e.g. "64 characters, hexadecimal.") must be captured before
+              // jsonic's number matcher grabs just the digits.
               if (fwd[0] >= '0' && fwd[0] <= '9') {
                 let hasEmbeddedColon = false
                 let hasTrailingText = false
+                let hasTrailingComma = false
                 let pi = 1
                 while (pi < fwd.length && fwd[pi] !== '\n' && fwd[pi] !== '\r') {
                   if (fwd[pi] === ':' && fwd[pi + 1] !== ' ' && fwd[pi + 1] !== '\t' &&
                       fwd[pi + 1] !== '\n' && fwd[pi + 1] !== '\r' && fwd[pi + 1] !== undefined) {
                     hasEmbeddedColon = true
+                    break
+                  }
+                  // Trailing comma at end of line means plain scalar in block
+                  // context (e.g. "12,"). In flow context commas are separators
+                  // and are followed by more values on the same line.
+                  if (fwd[pi] === ',') {
+                    let ci = pi + 1
+                    while (ci < fwd.length && (fwd[ci] === ' ' || fwd[ci] === '\t')) ci++
+                    if (ci >= fwd.length || fwd[ci] === '\n' || fwd[ci] === '\r') {
+                      hasTrailingComma = true
+                    }
                     break
                   }
                   if (fwd[pi] === ' ' || fwd[pi] === '\t') {
@@ -1955,7 +2086,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   }
                   pi++
                 }
-                if (hasEmbeddedColon) {
+                if (hasEmbeddedColon || hasTrailingComma) {
                   // Scan to end of plain scalar token (space, tab, newline, eof).
                   let end = 0
                   while (end < fwd.length && fwd[end] !== ' ' && fwd[end] !== '\t' &&
@@ -2026,23 +2157,28 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               // Detect flow context by counting unmatched brackets before current position.
               if (fwd[0] === '\n' || fwd[0] === '\r') {
                 // Reuse incremental flow-depth cache.
-                if (pnt.sI < _flowScanPos) { _flowDepth = 0; _flowScanPos = 0 }
+                if (pnt.sI < _flowScanPos) { _flowDepth = 0; _flowScanPos = 0; _inSingleQuote = false; _inDoubleQuote = false }
                 for (let fi = _flowScanPos; fi < pnt.sI; fi++) {
                   let fc = lex.src[fi]
+                  if (_inDoubleQuote) {
+                    if (fc === '\\') fi++
+                    else if (fc === '"') _inDoubleQuote = false
+                    continue
+                  }
+                  if (_inSingleQuote) {
+                    if (fc === "'") {
+                      if (lex.src[fi + 1] === "'") fi++
+                      else _inSingleQuote = false
+                    }
+                    continue
+                  }
                   if (fc === '{' || fc === '[') _flowDepth++
                   else if (fc === '}' || fc === ']') { if (_flowDepth > 0) _flowDepth-- }
-                  else if (fc === '"') {
-                    fi++
-                    while (fi < pnt.sI && lex.src[fi] !== '"') {
-                      if (lex.src[fi] === '\\') fi++
-                      fi++
-                    }
-                  }
+                  else if (fc === '"') { _inDoubleQuote = true }
                   else if (fc === "'") {
-                    fi++
-                    while (fi < pnt.sI && lex.src[fi] !== "'") {
-                      if (lex.src[fi] === "'" && lex.src[fi + 1] === "'") fi++
-                      fi++
+                    let pc = fi > 0 ? lex.src.charCodeAt(fi - 1) : 0
+                    if (!((pc >= 65 && pc <= 90) || (pc >= 97 && pc <= 122) || (pc >= 48 && pc <= 57))) {
+                      _inSingleQuote = true
                     }
                   }
                 }
