@@ -9,7 +9,7 @@ import (
 )
 
 // Yaml is a jsonic plugin that adds YAML parsing support.
-func Yaml(j *jsonic.Jsonic, _ map[string]any) {
+func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 	TX := j.Token("#TX")
 	NR := j.Token("#NR")
 	ST := j.Token("#ST")
@@ -35,29 +35,10 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) {
 	// Flag to tell the number matcher to skip, so TextCheck handles the value.
 	skipNumberMatch := false
 
-	// Remove colon as a fixed token — YAML uses ": " (colon-space).
 	cfg := j.Config()
-	delete(cfg.FixedTokens, ":")
-	cfg.SortFixedTokens()
-
-	// Add colon as an ender char so text tokens stop at ":".
-	if cfg.EnderChars == nil {
-		cfg.EnderChars = make(map[rune]bool)
-	}
-	cfg.EnderChars[':'] = true
-
-	// Skip number matching when the yamlMatcher detected trailing text
-	// after a digit-starting value (e.g. "64 characters, hexadecimal.").
-	cfg.NumberCheck = func(lex *jsonic.Lex) *jsonic.LexCheckResult {
-		if skipNumberMatch {
-			skipNumberMatch = false
-			return &jsonic.LexCheckResult{Done: true}
-		}
-		return nil
-	}
 
 	// ===== TextCheck: handles block scalars, !!tags, and plain scalars =====
-	cfg.TextCheck = func(lex *jsonic.Lex) *jsonic.LexCheckResult {
+	textCheck := func(lex *jsonic.Lex) *jsonic.LexCheckResult {
 		pnt := lex.Cursor()
 		src := lex.Src
 		fwd := src[pnt.SI:]
@@ -95,7 +76,7 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) {
 	// ===== Custom YAML matcher (priority 500000 — before fixed tokens) =====
 	srcCleaned := false
 
-	j.AddMatcher("yaml", 500000, func(lex *jsonic.Lex) *jsonic.Token {
+	yamlMatcher := func(lex *jsonic.Lex, _ *jsonic.Rule) *jsonic.Token {
 		pnt := lex.Cursor()
 		src := lex.Src
 
@@ -649,11 +630,42 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) {
 		}
 
 		return nil
-	})
+	}
+
+	// Register the YAML matcher via SetOptions (must come before cfg mutations
+	// below, as SetOptions rebuilds parts of the config).
+	j.SetOptions(jsonic.Options{Lex: &jsonic.LexOptions{Match: map[string]*jsonic.MatchSpec{
+		"yaml": {Order: 500000, Make: func(_ *jsonic.LexConfig, _ *jsonic.Options) jsonic.LexMatcher {
+			return yamlMatcher
+		}},
+	}}})
+
+	// Remove colon as a fixed token — YAML uses ": " (colon-space).
+	delete(cfg.FixedTokens, ":")
+	cfg.SortFixedTokens()
+
+	// Add colon as an ender char so text tokens stop at ":".
+	if cfg.EnderChars == nil {
+		cfg.EnderChars = make(map[rune]bool)
+	}
+	cfg.EnderChars[':'] = true
+
+	// Skip number matching when the yamlMatcher detected trailing text
+	// after a digit-starting value (e.g. "64 characters, hexadecimal.").
+	cfg.NumberCheck = func(lex *jsonic.Lex) *jsonic.LexCheckResult {
+		if skipNumberMatch {
+			skipNumberMatch = false
+			return &jsonic.LexCheckResult{Done: true}
+		}
+		return nil
+	}
+
+	cfg.TextCheck = textCheck
 
 	// ===== Grammar rules =====
 	configureGrammarRules(j, IN, EL, KEY, CL, ZZ, CA, CS, CB, TX, ST, VL, NR,
 		anchors, &pendingAnchors)
+	return nil
 }
 
 // cleanSource strips YAML directives and initial document markers from source.
