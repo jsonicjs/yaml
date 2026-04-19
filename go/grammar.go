@@ -43,6 +43,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 						r.N["in"] = v
 					}
 				},
+				G: "yaml",
 			},
 
 			// Same indent followed by element marker: list value at map level.
@@ -66,6 +67,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 						r.N["in"] = v
 					}
 				},
+				G: "yaml",
 			},
 
 			// End of input means empty value.
@@ -75,6 +77,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 				A: func(r *jsonic.Rule, ctx *jsonic.Context) {
 					r.Node = nil
 				},
+				G: "yaml",
 			},
 
 			// Same or lesser indent: empty value — backtrack.
@@ -82,6 +85,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 				S: [][]jsonic.Tin{{IN}},
 				B: 1,
 				U: map[string]any{"yamlEmpty": true},
+				G: "yaml",
 			},
 
 			// This value is a list.
@@ -91,6 +95,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 				A: func(r *jsonic.Rule, ctx *jsonic.Context) {
 					r.N["in"] = r.O0.CI - 1
 				},
+				G: "yaml",
 			},
 		)
 
@@ -131,7 +136,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 
 		// Close on indent tokens.
 		rs.PrependClose(
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{IN}}, B: 1},
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{IN}}, B: 1, G: "yaml"},
 		)
 
 		// After close: resolve aliases and record anchors.
@@ -183,9 +188,9 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		rs.Clear()
 		rs.Open = []*jsonic.AltSpec{
 			// Key pair → map.
-			{S: [][]jsonic.Tin{KEY, {CL}}, P: "map", B: 2},
+			{S: [][]jsonic.Tin{KEY, {CL}}, P: "map", B: 2, G: "yaml"},
 			// Element → list.
-			{S: [][]jsonic.Tin{{EL}}, P: "list"},
+			{S: [][]jsonic.Tin{{EL}}, P: "list", G: "yaml"},
 			// Plain value after indent.
 			{S: [][]jsonic.Tin{KEY},
 				A: func(r *jsonic.Rule, ctx *jsonic.Context) {
@@ -195,6 +200,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 						r.Node = r.O0.Src
 					}
 				},
+				G: "yaml",
 			},
 		}
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
@@ -217,8 +223,9 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 				A: func(r *jsonic.Rule, ctx *jsonic.Context) {
 					r.K["yamlMapIn"] = r.N["in"] + 2
 				},
+				G: "yaml",
 			},
-			{P: "val"},
+			{P: "val", G: "yaml"},
 		}
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			val := r.Child.Node
@@ -240,6 +247,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					return false
 				},
 				R: "yamlBlockElem",
+				G: "yaml",
 			},
 			{S: [][]jsonic.Tin{{IN}},
 				C: func(r *jsonic.Rule, ctx *jsonic.Context) bool {
@@ -249,9 +257,10 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					return false
 				},
 				B: 1,
+				G: "yaml",
 			},
-			{S: [][]jsonic.Tin{{EL}}, R: "yamlBlockElem"},
-			{S: [][]jsonic.Tin{{ZZ}}, B: 1},
+			{S: [][]jsonic.Tin{{EL}}, R: "yamlBlockElem", G: "yaml"},
+			{S: [][]jsonic.Tin{{ZZ}}, B: 1, G: "yaml"},
 		}
 	})
 
@@ -266,8 +275,9 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 				A: func(r *jsonic.Rule, ctx *jsonic.Context) {
 					r.K["yamlMapIn"] = r.N["in"] + 2
 				},
+				G: "yaml",
 			},
-			{P: "val"},
+			{P: "val", G: "yaml"},
 		}
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			val := r.Child.Node
@@ -289,6 +299,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					return false
 				},
 				R: "yamlBlockElem",
+				G: "yaml",
 			},
 			{S: [][]jsonic.Tin{{IN}},
 				C: func(r *jsonic.Rule, ctx *jsonic.Context) bool {
@@ -298,9 +309,10 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					return false
 				},
 				B: 1,
+				G: "yaml",
 			},
-			{S: [][]jsonic.Tin{{EL}}, R: "yamlBlockElem"},
-			{S: [][]jsonic.Tin{{ZZ}}, B: 1},
+			{S: [][]jsonic.Tin{{EL}}, R: "yamlBlockElem", G: "yaml"},
+			{S: [][]jsonic.Tin{{ZZ}}, B: 1, G: "yaml"},
 		}
 	})
 
@@ -319,6 +331,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					return false
 				},
 				B: 1,
+				G: "yaml",
 			},
 		)
 	})
@@ -341,6 +354,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					return false
 				},
 				R: "pair",
+				G: "yaml",
 			},
 		)
 		// Handle merge keys.
@@ -383,6 +397,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					return false
 				},
 				B: 1,
+				G: "yaml",
 			},
 		)
 	})
@@ -390,7 +405,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 	// ===== pair rule amendments =====
 	j.Rule("pair", func(rs *jsonic.RuleSpec) {
 		rs.PrependOpen(
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{ZZ}}, B: 1},
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{ZZ}}, B: 1, G: "yaml"},
 		)
 		rs.PrependClose(
 			&jsonic.AltSpec{
@@ -402,6 +417,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					return false
 				},
 				R: "pair",
+				G: "yaml",
 			},
 			&jsonic.AltSpec{
 				S: [][]jsonic.Tin{{IN}},
@@ -412,6 +428,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					return false
 				},
 				B: 1,
+				G: "yaml",
 			},
 		)
 	})
@@ -427,6 +444,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 				A: func(r *jsonic.Rule, ctx *jsonic.Context) {
 					r.U["key"] = extractKey(r.O0, anchors)
 				},
+				G: "yaml",
 			},
 		}
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
@@ -451,12 +469,13 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					return false
 				},
 				R: "yamlElemPair",
+				G: "yaml",
 			},
-			{S: [][]jsonic.Tin{{IN}}, B: 1},
-			{S: [][]jsonic.Tin{{CA}}, B: 1},
-			{S: [][]jsonic.Tin{{CS}}, B: 1},
-			{S: [][]jsonic.Tin{{CB}}, B: 1},
-			{S: [][]jsonic.Tin{{ZZ}}},
+			{S: [][]jsonic.Tin{{IN}}, B: 1, G: "yaml"},
+			{S: [][]jsonic.Tin{{CA}}, B: 1, G: "yaml"},
+			{S: [][]jsonic.Tin{{CS}}, B: 1, G: "yaml"},
+			{S: [][]jsonic.Tin{{CB}}, B: 1, G: "yaml"},
+			{S: [][]jsonic.Tin{{ZZ}}, G: "yaml"},
 		}
 	})
 
@@ -468,6 +487,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 				A: func(r *jsonic.Rule, ctx *jsonic.Context) {
 					r.U["key"] = extractKey(r.O0, anchors)
 				},
+				G: "yaml",
 			},
 		}
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
@@ -492,12 +512,13 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					return false
 				},
 				R: "yamlElemPair",
+				G: "yaml",
 			},
-			{S: [][]jsonic.Tin{{IN}}, B: 1},
-			{S: [][]jsonic.Tin{{CA}}, B: 1},
-			{S: [][]jsonic.Tin{{CS}}, B: 1},
-			{S: [][]jsonic.Tin{{CB}}, B: 1},
-			{S: [][]jsonic.Tin{{ZZ}}},
+			{S: [][]jsonic.Tin{{IN}}, B: 1, G: "yaml"},
+			{S: [][]jsonic.Tin{{CA}}, B: 1, G: "yaml"},
+			{S: [][]jsonic.Tin{{CS}}, B: 1, G: "yaml"},
+			{S: [][]jsonic.Tin{{CB}}, B: 1, G: "yaml"},
+			{S: [][]jsonic.Tin{{ZZ}}, G: "yaml"},
 		}
 	})
 
@@ -508,6 +529,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 				A: func(r *jsonic.Rule, ctx *jsonic.Context) {
 					r.K["yamlMapIn"] = r.N["in"] + 2
 				},
+				G: "yaml",
 			},
 		)
 		rs.PrependClose(
@@ -520,6 +542,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					return false
 				},
 				R: "elem",
+				G: "yaml",
 			},
 			&jsonic.AltSpec{
 				S: [][]jsonic.Tin{{IN}},
@@ -530,6 +553,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					return false
 				},
 				B: 1,
+				G: "yaml",
 			},
 			&jsonic.AltSpec{
 				S: [][]jsonic.Tin{{IN}},
@@ -540,8 +564,9 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					return false
 				},
 				B: 1,
+				G: "yaml",
 			},
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{EL}}, R: "elem"},
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{EL}}, R: "elem", G: "yaml"},
 		)
 	})
 }

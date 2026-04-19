@@ -2317,7 +2317,8 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           return parentIn == null || ctx.t0.val > parentIn
         },
         p: 'indent',
-        a: (rule: Rule) => rule.n.in = rule.o0.val
+        a: (rule: Rule) => rule.n.in = rule.o0.val,
+        g: 'yaml',
       },
 
       // Same indent followed by element marker: list value at map level.
@@ -2330,7 +2331,8 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         p: 'yamlBlockList',
         a: (rule: Rule) => {
           rule.n.in = rule.o0.val
-        }
+        },
+        g: 'yaml',
       },
 
       // End of input means empty value — produce null.
@@ -2338,6 +2340,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         s: [ZZ],
         b: 1,
         a: (rule: Rule) => { rule.node = null },
+        g: 'yaml',
       },
 
       // Same or lesser indent after a colon means empty value — backtrack.
@@ -2345,6 +2348,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         s: [IN],
         b: 1,
         u: { yamlEmpty: true },
+        g: 'yaml',
       },
 
 
@@ -2355,7 +2359,8 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         a: (rule: Rule) => {
           // Set list indent from the element marker's column (1-based).
           rule.n.in = rule.o0.cI - 1
-        }
+        },
+        g: 'yaml',
       }
     ])
 
@@ -2379,7 +2384,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
     // Close val on indent tokens — prevents Jsonic's implicit list
     // from consuming YAML block continuation tokens.
     rulespec.close([
-      { s: [IN], b: 1 },
+      { s: [IN], b: 1, g: 'yaml' },
     ])
 
     // Record anchors and resolve aliases after val is fully resolved.
@@ -2427,12 +2432,14 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           s: [KEY, CL],
           p: 'map',
           b: 2,
+          g: 'yaml',
         },
 
         // Element, so this must be a list.
         {
           s: [EL],
           p: 'list',
+          g: 'yaml',
         },
 
         // A plain value after indent (for nested scalars).
@@ -2442,6 +2449,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             rule.node = ST === rule.o0.tin || TX === rule.o0.tin
               ? rule.o0.val : rule.o0.src
           },
+          g: 'yaml',
         }
       ])
 
@@ -2472,9 +2480,10 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           a: (rule: Rule) => {
             rule.k.yamlMapIn = rule.n.in + 2
           },
+          g: 'yaml',
         },
         // Default: push to val for the element's value.
-        { p: 'val' },
+        { p: 'val', g: 'yaml' },
       ])
       .bc((rule: Rule) => {
         let val = rule.child.node !== undefined ? rule.child.node : null
@@ -2488,6 +2497,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             return ctx.t0.val === rule.n.in
           },
           r: 'yamlBlockElem',
+          g: 'yaml',
         },
         // Same indent but no element marker: close list.
         {
@@ -2496,13 +2506,15 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             return ctx.t0.val <= rule.n.in
           },
           b: 1,
+          g: 'yaml',
         },
         // Element marker at top level (no preceding newline).
         {
           s: [EL],
           r: 'yamlBlockElem',
+          g: 'yaml',
         },
-        { s: [ZZ], b: 1 },
+        { s: [ZZ], b: 1, g: 'yaml' },
       ])
   })
 
@@ -2522,9 +2534,10 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           a: (rule: Rule) => {
             rule.k.yamlMapIn = rule.n.in + 2
           },
+          g: 'yaml',
         },
         // Default: push to val for the element's value.
-        { p: 'val' },
+        { p: 'val', g: 'yaml' },
       ])
       .bc((rule: Rule) => {
         let val = rule.child.node !== undefined ? rule.child.node : null
@@ -2538,6 +2551,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             return ctx.t0.val === rule.n.in
           },
           r: 'yamlBlockElem',
+          g: 'yaml',
         },
         // Same or lesser indent: close.
         {
@@ -2546,13 +2560,15 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             return ctx.t0.val <= rule.n.in
           },
           b: 1,
+          g: 'yaml',
         },
         // Element marker at top level.
         {
           s: [EL],
           r: 'yamlBlockElem',
+          g: 'yaml',
         },
-        { s: [ZZ], b: 1 },
+        { s: [ZZ], b: 1, g: 'yaml' },
       ])
   })
 
@@ -2571,6 +2587,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           return ctx.t0.val <= rule.n.in
         },
         b: 1,
+        g: 'yaml',
       },
     ])
   })
@@ -2593,6 +2610,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         s: [IN],
         c: (rule: Rule) => rule.o0.val === rule.n.in,
         r: 'pair',
+        g: 'yaml',
       },
     ])
 
@@ -2625,6 +2643,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           return ctx.t0.val < rule.n.in
         },
         b: 1,
+        g: 'yaml',
       },
     ])
   })
@@ -2634,7 +2653,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
   jsonic.rule('pair', (rulespec: RuleSpec) => {
     rulespec.open([
       // End of input in pair open: close gracefully.
-      { s: [ZZ], b: 1 },
+      { s: [ZZ], b: 1, g: 'yaml' },
     ])
 
 
@@ -2647,6 +2666,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           return ctx.t0.val === rule.n.in
         },
         r: 'pair',
+        g: 'yaml',
       },
 
       // Smaller indent: close this pair (and the map will close too).
@@ -2656,6 +2676,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           return ctx.t0.val < rule.n.in
         },
         b: 1,
+        g: 'yaml',
       },
     ])
   })
@@ -2676,6 +2697,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           a: (rule: Rule) => {
             rule.u.key = extractKey(rule)
           },
+          g: 'yaml',
         },
       ])
       .bc((rule: Rule) => {
@@ -2691,17 +2713,19 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             return ctx.t0.val === rule.k.yamlMapIn
           },
           r: 'yamlElemPair',
+          g: 'yaml',
         },
         // Different indent or end: close the map.
         {
           s: [IN],
           b: 1,
+          g: 'yaml',
         },
         // Flow collection: comma or close bracket/brace ends the map.
-        { s: [CA], b: 1 },
-        { s: [CS], b: 1 },
-        { s: [CB], b: 1 },
-        { s: [ZZ] },
+        { s: [CA], b: 1, g: 'yaml' },
+        { s: [CS], b: 1, g: 'yaml' },
+        { s: [CB], b: 1, g: 'yaml' },
+        { s: [ZZ], g: 'yaml' },
       ])
   })
 
@@ -2715,6 +2739,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           a: (rule: Rule) => {
             rule.u.key = extractKey(rule)
           },
+          g: 'yaml',
         },
       ])
       .bc((rule: Rule) => {
@@ -2730,17 +2755,19 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
             return ctx.t0.val === rule.k.yamlMapIn
           },
           r: 'yamlElemPair',
+          g: 'yaml',
         },
         // Different indent or end: close.
         {
           s: [IN],
           b: 1,
+          g: 'yaml',
         },
         // Flow collection: comma or close bracket/brace ends the pair.
-        { s: [CA], b: 1 },
-        { s: [CS], b: 1 },
-        { s: [CB], b: 1 },
-        { s: [ZZ] },
+        { s: [CA], b: 1, g: 'yaml' },
+        { s: [CS], b: 1, g: 'yaml' },
+        { s: [CB], b: 1, g: 'yaml' },
+        { s: [ZZ], g: 'yaml' },
       ])
   })
 
@@ -2757,6 +2784,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           // The map's pairs are indented: list indent + 2 (for "- ").
           rule.k.yamlMapIn = rule.n.in + 2
         },
+        g: 'yaml',
       },
     ])
 
@@ -2768,6 +2796,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           return ctx.t0.val === rule.n.in
         },
         r: 'elem',
+        g: 'yaml',
       },
 
       // Same indent but no element marker: close list (e.g. map key follows).
@@ -2777,6 +2806,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           return ctx.t0.val === rule.n.in
         },
         b: 1,
+        g: 'yaml',
       },
 
       // Dedent: close this list.
@@ -2786,12 +2816,14 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           return ctx.t0.val < rule.n.in
         },
         b: 1,
+        g: 'yaml',
       },
 
       // Element marker at top level (no preceding newline).
       {
         s: [EL],
         r: 'elem',
+        g: 'yaml',
       },
     ])
   })
