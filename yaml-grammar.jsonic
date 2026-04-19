@@ -1,0 +1,149 @@
+# YAML Grammar Definition
+# Parsed by a standard Jsonic instance and passed to jsonic.grammar()
+# Function references (@ prefixed) are resolved against the refs map.
+# State handlers (bo/ao/bc/ac) remain wired in code, since they use
+# closures over per-parse state (anchors, pendingAnchors, etc.).
+
+{
+  # Amend val rule: YAML indent/element-marker handling.
+  rule: val: open: {
+    alts: [
+      # Indent followed by content: push indent rule.
+      { s: '#IN' c: '@val-indent-deeper' p: indent a: '@val-set-in-from-o0' g: yaml }
+      # Same indent followed by element marker: list value at map level.
+      { s: ['#IN' '#EL'] c: '@val-indent-eq-parent' p: yamlBlockList a: '@val-set-in-from-o0' g: yaml }
+      # End of input means empty value.
+      { s: '#ZZ' b: 1 a: '@val-set-null' g: yaml }
+      # Same or lesser indent after a colon means empty value — backtrack.
+      { s: '#IN' b: 1 u: { yamlEmpty: true } g: yaml }
+      # This value is a list.
+      { s: '#EL' p: yamlBlockList a: '@val-set-el-in' g: yaml }
+    ]
+    inject: { append: false }
+  }
+  rule: val: close: {
+    alts: [
+      { s: '#IN' b: 1 g: yaml }
+    ]
+    inject: { append: false }
+  }
+
+  # Indent rule: start for block content at a given indent.
+  rule: indent: open: [
+    # Key pair => map.
+    { s: ['#KEY' '#CL'] p: map b: 2 g: yaml }
+    # Element marker => list.
+    { s: '#EL' p: list g: yaml }
+    # Plain value after indent (for nested scalars).
+    { s: '#KEY' a: '@indent-plain-value' g: yaml }
+  ]
+
+  # YAML block list: handles "- " sequences without consuming "[".
+  rule: yamlBlockList: open: [
+    # Element value is a key-value map: - key: val
+    { s: ['#KEY' '#CL'] p: yamlElemMap b: 2 a: '@set-map-in' g: yaml }
+    # Default: push to val for the element's value.
+    { p: val g: yaml }
+  ]
+  rule: yamlBlockList: close: [
+    # Indent followed by element marker: next element at same level.
+    { s: ['#IN' '#EL'] c: '@t0-eq-in' r: yamlBlockElem g: yaml }
+    # Same or lesser indent: close list.
+    { s: '#IN' c: '@t0-le-in' b: 1 g: yaml }
+    # Element marker at top level (no preceding newline).
+    { s: '#EL' r: yamlBlockElem g: yaml }
+    { s: '#ZZ' b: 1 g: yaml }
+  ]
+
+  # Subsequent elements in a yamlBlockList (via rotation).
+  rule: yamlBlockElem: open: [
+    { s: ['#KEY' '#CL'] p: yamlElemMap b: 2 a: '@set-map-in' g: yaml }
+    { p: val g: yaml }
+  ]
+  rule: yamlBlockElem: close: [
+    { s: ['#IN' '#EL'] c: '@t0-eq-in' r: yamlBlockElem g: yaml }
+    { s: '#IN' c: '@t0-le-in' b: 1 g: yaml }
+    { s: '#EL' r: yamlBlockElem g: yaml }
+    { s: '#ZZ' b: 1 g: yaml }
+  ]
+
+  # Amend list rule: close on dedent or same-indent non-element.
+  rule: list: close: {
+    alts: [
+      { s: '#IN' c: '@t0-le-in' b: 1 g: yaml }
+    ]
+    inject: { append: false }
+  }
+
+  # Amend map rule: same-indent indent continues map with pair.
+  rule: map: open: {
+    alts: [
+      { s: '#IN' c: '@o0-eq-in' r: pair g: yaml }
+    ]
+    inject: { append: false }
+  }
+  rule: map: close: {
+    alts: [
+      { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
+    ]
+    inject: { append: false }
+  }
+
+  # Amend pair rule: end of input ends pair; dedent closes, same-indent repeats.
+  rule: pair: open: {
+    alts: [
+      { s: '#ZZ' b: 1 g: yaml }
+    ]
+    inject: { append: false }
+  }
+  rule: pair: close: {
+    alts: [
+      { s: '#IN' c: '@t0-eq-in' r: pair g: yaml }
+      { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
+    ]
+    inject: { append: false }
+  }
+
+  # yamlElemMap: "- key: val" patterns.
+  rule: yamlElemMap: open: [
+    { s: ['#KEY' '#CL'] p: val a: '@elem-key' g: yaml }
+  ]
+  rule: yamlElemMap: close: [
+    { s: '#IN' c: '@t0-eq-map-in' r: yamlElemPair g: yaml }
+    { s: '#IN' b: 1 g: yaml }
+    { s: '#CA' b: 1 g: yaml }
+    { s: '#CS' b: 1 g: yaml }
+    { s: '#CB' b: 1 g: yaml }
+    { s: '#ZZ' g: yaml }
+  ]
+
+  # Additional pairs in a yamlElemMap.
+  rule: yamlElemPair: open: [
+    { s: ['#KEY' '#CL'] p: val a: '@elem-key' g: yaml }
+  ]
+  rule: yamlElemPair: close: [
+    { s: '#IN' c: '@t0-eq-map-in' r: yamlElemPair g: yaml }
+    { s: '#IN' b: 1 g: yaml }
+    { s: '#CA' b: 1 g: yaml }
+    { s: '#CS' b: 1 g: yaml }
+    { s: '#CB' b: 1 g: yaml }
+    { s: '#ZZ' g: yaml }
+  ]
+
+  # Amend elem rule for YAML sequences ("- key: val" at top level of [ ... ]).
+  rule: elem: open: {
+    alts: [
+      { s: ['#KEY' '#CL'] p: yamlElemMap b: 2 a: '@set-map-in' g: yaml }
+    ]
+    inject: { append: false }
+  }
+  rule: elem: close: {
+    alts: [
+      { s: ['#IN' '#EL'] c: '@t0-eq-in' r: elem g: yaml }
+      { s: '#IN' c: '@t0-eq-in' b: 1 g: yaml }
+      { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
+      { s: '#EL' r: elem g: yaml }
+    ]
+    inject: { append: false }
+  }
+}
