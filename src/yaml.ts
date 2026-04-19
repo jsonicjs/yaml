@@ -18,7 +18,166 @@ type YamlOptions = {
 }
 
 
+// --- BEGIN EMBEDDED yaml-grammar.jsonic ---
+const grammarText = `
+# YAML Grammar Definition
+# Parsed by a standard Jsonic instance and passed to jsonic.grammar()
+# Function references (@ prefixed) are resolved against the refs map.
+# State handlers (bo/ao/bc/ac) remain wired in code, since they use
+# closures over per-parse state (anchors, pendingAnchors, etc.).
+
+{
+  # Amend val rule: YAML indent/element-marker handling.
+  rule: val: open: {
+    alts: [
+      # Indent followed by content: push indent rule.
+      { s: '#IN' c: '@val-indent-deeper' p: indent a: '@val-set-in-from-o0' g: yaml }
+      # Same indent followed by element marker: list value at map level.
+      { s: ['#IN' '#EL'] c: '@val-indent-eq-parent' p: yamlBlockList a: '@val-set-in-from-o0' g: yaml }
+      # End of input means empty value.
+      { s: '#ZZ' b: 1 a: '@val-set-null' g: yaml }
+      # Same or lesser indent after a colon means empty value — backtrack.
+      { s: '#IN' b: 1 u: { yamlEmpty: true } g: yaml }
+      # This value is a list.
+      { s: '#EL' p: yamlBlockList a: '@val-set-el-in' g: yaml }
+    ]
+    inject: { append: false }
+  }
+  rule: val: close: {
+    alts: [
+      { s: '#IN' b: 1 g: yaml }
+    ]
+    inject: { append: false }
+  }
+
+  # Indent rule: start for block content at a given indent.
+  rule: indent: open: [
+    # Key pair => map.
+    { s: ['#KEY' '#CL'] p: map b: 2 g: yaml }
+    # Element marker => list.
+    { s: '#EL' p: list g: yaml }
+    # Plain value after indent (for nested scalars).
+    { s: '#KEY' a: '@indent-plain-value' g: yaml }
+  ]
+
+  # YAML block list: handles "- " sequences without consuming "[".
+  rule: yamlBlockList: open: [
+    # Element value is a key-value map: - key: val
+    { s: ['#KEY' '#CL'] p: yamlElemMap b: 2 a: '@set-map-in' g: yaml }
+    # Default: push to val for the element's value.
+    { p: val g: yaml }
+  ]
+  rule: yamlBlockList: close: [
+    # Indent followed by element marker: next element at same level.
+    { s: ['#IN' '#EL'] c: '@t0-eq-in' r: yamlBlockElem g: yaml }
+    # Same or lesser indent: close list.
+    { s: '#IN' c: '@t0-le-in' b: 1 g: yaml }
+    # Element marker at top level (no preceding newline).
+    { s: '#EL' r: yamlBlockElem g: yaml }
+    { s: '#ZZ' b: 1 g: yaml }
+  ]
+
+  # Subsequent elements in a yamlBlockList (via rotation).
+  rule: yamlBlockElem: open: [
+    { s: ['#KEY' '#CL'] p: yamlElemMap b: 2 a: '@set-map-in' g: yaml }
+    { p: val g: yaml }
+  ]
+  rule: yamlBlockElem: close: [
+    { s: ['#IN' '#EL'] c: '@t0-eq-in' r: yamlBlockElem g: yaml }
+    { s: '#IN' c: '@t0-le-in' b: 1 g: yaml }
+    { s: '#EL' r: yamlBlockElem g: yaml }
+    { s: '#ZZ' b: 1 g: yaml }
+  ]
+
+  # Amend list rule: close on dedent or same-indent non-element.
+  rule: list: close: {
+    alts: [
+      { s: '#IN' c: '@t0-le-in' b: 1 g: yaml }
+    ]
+    inject: { append: false }
+  }
+
+  # Amend map rule: same-indent indent continues map with pair.
+  rule: map: open: {
+    alts: [
+      { s: '#IN' c: '@o0-eq-in' r: pair g: yaml }
+    ]
+    inject: { append: false }
+  }
+  rule: map: close: {
+    alts: [
+      { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
+    ]
+    inject: { append: false }
+  }
+
+  # Amend pair rule: end of input ends pair; dedent closes, same-indent repeats.
+  rule: pair: open: {
+    alts: [
+      { s: '#ZZ' b: 1 g: yaml }
+    ]
+    inject: { append: false }
+  }
+  rule: pair: close: {
+    alts: [
+      { s: '#IN' c: '@t0-eq-in' r: pair g: yaml }
+      { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
+    ]
+    inject: { append: false }
+  }
+
+  # yamlElemMap: "- key: val" patterns.
+  rule: yamlElemMap: open: [
+    { s: ['#KEY' '#CL'] p: val a: '@elem-key' g: yaml }
+  ]
+  rule: yamlElemMap: close: [
+    { s: '#IN' c: '@t0-eq-map-in' r: yamlElemPair g: yaml }
+    { s: '#IN' b: 1 g: yaml }
+    { s: '#CA' b: 1 g: yaml }
+    { s: '#CS' b: 1 g: yaml }
+    { s: '#CB' b: 1 g: yaml }
+    { s: '#ZZ' g: yaml }
+  ]
+
+  # Additional pairs in a yamlElemMap.
+  rule: yamlElemPair: open: [
+    { s: ['#KEY' '#CL'] p: val a: '@elem-key' g: yaml }
+  ]
+  rule: yamlElemPair: close: [
+    { s: '#IN' c: '@t0-eq-map-in' r: yamlElemPair g: yaml }
+    { s: '#IN' b: 1 g: yaml }
+    { s: '#CA' b: 1 g: yaml }
+    { s: '#CS' b: 1 g: yaml }
+    { s: '#CB' b: 1 g: yaml }
+    { s: '#ZZ' g: yaml }
+  ]
+
+  # Amend elem rule for YAML sequences ("- key: val" at top level of [ ... ]).
+  rule: elem: open: {
+    alts: [
+      { s: ['#KEY' '#CL'] p: yamlElemMap b: 2 a: '@set-map-in' g: yaml }
+    ]
+    inject: { append: false }
+  }
+  rule: elem: close: {
+    alts: [
+      { s: ['#IN' '#EL'] c: '@t0-eq-in' r: elem g: yaml }
+      { s: '#IN' c: '@t0-eq-in' b: 1 g: yaml }
+      { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
+      { s: '#EL' r: elem g: yaml }
+    ]
+    inject: { append: false }
+  }
+}
+`
+// --- END EMBEDDED yaml-grammar.jsonic ---
+
+
 const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
+  // Guard against re-entry during options() re-application.
+  if ((jsonic as any).__yamlInstalled) return
+  ;(jsonic as any).__yamlInstalled = true
+
   let TX = jsonic.token.TX
   let NR = jsonic.token.NR
   let ST = jsonic.token.ST
@@ -2302,92 +2461,56 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
     return ST === o0.tin || TX === o0.tin ? o0.val : o0.src
   }
 
-  // Amend val rule to handle indents and element markers.
+  // Function refs used by the declarative grammar (yaml-grammar.jsonic).
+  const refs: Record<string, Function> = {
+    '@val-indent-deeper': (rule: Rule, ctx: Context) => {
+      let parentIn = rule.k.yamlIn
+      let listIn = rule.k.yamlListIn
+      if (listIn != null && ctx.t0.val <= listIn) return false
+      return parentIn == null || ctx.t0.val > parentIn
+    },
+    '@val-indent-eq-parent': (rule: Rule, ctx: Context) => {
+      let parentIn = rule.k.yamlIn
+      return parentIn != null && ctx.t0.val === parentIn
+    },
+    '@val-set-in-from-o0': (rule: Rule) => { rule.n.in = rule.o0.val },
+    '@val-set-null': (rule: Rule) => { rule.node = null },
+    '@val-set-el-in': (rule: Rule) => { rule.n.in = rule.o0.cI - 1 },
+    '@indent-plain-value': (rule: Rule) => {
+      rule.node = ST === rule.o0.tin || TX === rule.o0.tin
+        ? rule.o0.val : rule.o0.src
+    },
+    '@set-map-in': (rule: Rule) => { rule.k.yamlMapIn = rule.n.in + 2 },
+    '@t0-eq-in': (rule: Rule, ctx: Context) => ctx.t0.val === rule.n.in,
+    '@t0-le-in': (rule: Rule, ctx: Context) => ctx.t0.val <= rule.n.in,
+    '@t0-lt-in': (rule: Rule, ctx: Context) => ctx.t0.val < rule.n.in,
+    '@o0-eq-in': (rule: Rule) => rule.o0.val === rule.n.in,
+    '@t0-eq-map-in': (rule: Rule, ctx: Context) => ctx.t0.val === rule.k.yamlMapIn,
+    '@elem-key': (rule: Rule) => { rule.u.key = extractKey(rule) },
+  }
+
+  // Parse the embedded grammar text and install declarative rules.
+  const grammarDef: any = (Jsonic.make() as any)(grammarText)
+  grammarDef.ref = refs
+  jsonic.grammar(grammarDef)
+
+  // ===== State handlers (bo/ao/bc/ac) — kept in code for closure capture =====
+
+  // val rule: claim pending anchors (ao), handle empty (bc),
+  //          resolve aliases and record anchors (ac).
   jsonic.rule('val', (rulespec: RuleSpec) => {
-    rulespec.open([
-      {
-        s: [IN],
-        c: (rule: Rule, ctx: Context) => {
-          // Only push indent if level is strictly greater than enclosing map.
-          let parentIn = rule.k.yamlIn
-          let listIn = rule.k.yamlListIn
-          // Inside a list element, don't push indent at the list's level —
-          // that means this value is empty and the next elem follows.
-          if (listIn != null && ctx.t0.val <= listIn) return false
-          return parentIn == null || ctx.t0.val > parentIn
-        },
-        p: 'indent',
-        a: (rule: Rule) => rule.n.in = rule.o0.val,
-        g: 'yaml',
-      },
-
-      // Same indent followed by element marker: list value at map level.
-      {
-        s: [IN, EL],
-        c: (rule: Rule, ctx: Context) => {
-          let parentIn = rule.k.yamlIn
-          return parentIn != null && ctx.t0.val === parentIn
-        },
-        p: 'yamlBlockList',
-        a: (rule: Rule) => {
-          rule.n.in = rule.o0.val
-        },
-        g: 'yaml',
-      },
-
-      // End of input means empty value — produce null.
-      {
-        s: [ZZ],
-        b: 1,
-        a: (rule: Rule) => { rule.node = null },
-        g: 'yaml',
-      },
-
-      // Same or lesser indent after a colon means empty value — backtrack.
-      {
-        s: [IN],
-        b: 1,
-        u: { yamlEmpty: true },
-        g: 'yaml',
-      },
-
-
-      // This value is a list.
-      {
-        s: [EL],
-        p: 'yamlBlockList',
-        a: (rule: Rule) => {
-          // Set list indent from the element marker's column (1-based).
-          rule.n.in = rule.o0.cI - 1
-        },
-        g: 'yaml',
-      }
-    ])
-
-    // Claim pending anchors after first token is processed.
     rulespec.ao((rule: Rule) => {
       if (pendingAnchors.length > 0) {
         rule.u.yamlAnchors = [...pendingAnchors]
         rule.u.yamlAnchorOpenNode = rule.node
-        // Note: rule.node is undefined at ao time, so we can't record
-        // anchor values here. Recording happens in ac.
         pendingAnchors.length = 0
       }
     })
-
     rulespec.bc((rule: Rule) => {
       if (rule.u.yamlEmpty) {
         rule.node = undefined
       }
     })
-
-    // Close val on indent tokens — prevents Jsonic's implicit list
-    // from consuming YAML block continuation tokens.
-    rulespec.close([
-      { s: [IN], b: 1, g: 'yaml' },
-    ])
-
-    // Record anchors and resolve aliases after val is fully resolved.
     rulespec.ac((rule: Rule) => {
       // Resolve alias markers to actual values.
       if (rule.node && typeof rule.node === 'object' &&
@@ -2404,8 +2527,6 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
       // Record anchors only if this val claimed them.
       if (rule.u.yamlAnchors) {
         for (let anchor of rule.u.yamlAnchors) {
-          // For inline anchors that were recorded at open time with a
-          // scalar value, don't overwrite with the final compound value.
           if (anchor.inline &&
               rule.u.yamlAnchorOpenNode != null &&
               typeof rule.u.yamlAnchorOpenNode !== 'object' &&
@@ -2422,199 +2543,54 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
     })
   })
 
-
-  // Add indent rule to handle initial indent.
+  // indent rule: propagate child node up on close.
   jsonic.rule('indent', (rulespec: RuleSpec) => {
-    rulespec
-      .open([
-        // Key pair, so this must be a map.
-        {
-          s: [KEY, CL],
-          p: 'map',
-          b: 2,
-          g: 'yaml',
-        },
-
-        // Element, so this must be a list.
-        {
-          s: [EL],
-          p: 'list',
-          g: 'yaml',
-        },
-
-        // A plain value after indent (for nested scalars).
-        {
-          s: [KEY],
-          a: (rule: Rule) => {
-            rule.node = ST === rule.o0.tin || TX === rule.o0.tin
-              ? rule.o0.val : rule.o0.src
-          },
-          g: 'yaml',
-        }
-      ])
-
-      // Get the final value of the map or value.
-      .bc((rule: Rule) => {
-        if (undefined !== rule.child.node) {
-          rule.node = rule.child.node
-        }
-      })
+    rulespec.bc((rule: Rule) => {
+      if (undefined !== rule.child.node) {
+        rule.node = rule.child.node
+      }
+    })
   })
 
-
-  // YAML block list rule: handles "- " sequences without consuming "[".
-  // Uses context key k.yamlBlockArr to share the array across rotations.
+  // yamlBlockList rule: init array and push child nodes.
   jsonic.rule('yamlBlockList', (rulespec: RuleSpec) => {
-    rulespec
-      .bo((rule: Rule) => {
-        rule.node = []
-        rule.k.yamlBlockArr = rule.node
-        rule.k.yamlListIn = rule.n.in
-      })
-      .open([
-        // Element value is a key-value map: - key: val
-        {
-          s: [KEY, CL],
-          p: 'yamlElemMap',
-          b: 2,
-          a: (rule: Rule) => {
-            rule.k.yamlMapIn = rule.n.in + 2
-          },
-          g: 'yaml',
-        },
-        // Default: push to val for the element's value.
-        { p: 'val', g: 'yaml' },
-      ])
-      .bc((rule: Rule) => {
-        let val = rule.child.node !== undefined ? rule.child.node : null
-        rule.k.yamlBlockArr.push(val)
-      })
-      .close([
-        // Indent followed by element marker: next element at same level.
-        {
-          s: [IN, EL],
-          c: (rule: Rule, ctx: Context) => {
-            return ctx.t0.val === rule.n.in
-          },
-          r: 'yamlBlockElem',
-          g: 'yaml',
-        },
-        // Same indent but no element marker: close list.
-        {
-          s: [IN],
-          c: (rule: Rule, ctx: Context) => {
-            return ctx.t0.val <= rule.n.in
-          },
-          b: 1,
-          g: 'yaml',
-        },
-        // Element marker at top level (no preceding newline).
-        {
-          s: [EL],
-          r: 'yamlBlockElem',
-          g: 'yaml',
-        },
-        { s: [ZZ], b: 1, g: 'yaml' },
-      ])
-  })
-
-  // Subsequent elements in a yamlBlockList (via rotation).
-  jsonic.rule('yamlBlockElem', (rulespec: RuleSpec) => {
-    rulespec
-      .bo((rule: Rule) => {
-        // Share the array from the original yamlBlockList via context.
-        rule.node = rule.k.yamlBlockArr
-      })
-      .open([
-        // Element value is a key-value map: - key: val
-        {
-          s: [KEY, CL],
-          p: 'yamlElemMap',
-          b: 2,
-          a: (rule: Rule) => {
-            rule.k.yamlMapIn = rule.n.in + 2
-          },
-          g: 'yaml',
-        },
-        // Default: push to val for the element's value.
-        { p: 'val', g: 'yaml' },
-      ])
-      .bc((rule: Rule) => {
-        let val = rule.child.node !== undefined ? rule.child.node : null
-        rule.k.yamlBlockArr.push(val)
-      })
-      .close([
-        // Indent followed by element marker: next element at same level.
-        {
-          s: [IN, EL],
-          c: (rule: Rule, ctx: Context) => {
-            return ctx.t0.val === rule.n.in
-          },
-          r: 'yamlBlockElem',
-          g: 'yaml',
-        },
-        // Same or lesser indent: close.
-        {
-          s: [IN],
-          c: (rule: Rule, ctx: Context) => {
-            return ctx.t0.val <= rule.n.in
-          },
-          b: 1,
-          g: 'yaml',
-        },
-        // Element marker at top level.
-        {
-          s: [EL],
-          r: 'yamlBlockElem',
-          g: 'yaml',
-        },
-        { s: [ZZ], b: 1, g: 'yaml' },
-      ])
-  })
-
-  // Amend list rule: close on dedent or same-indent non-element.
-  jsonic.rule('list', (rulespec: RuleSpec) => {
     rulespec.bo((rule: Rule) => {
-      // Propagate list indent so val can check nesting depth.
+      rule.node = []
+      rule.k.yamlBlockArr = rule.node
       rule.k.yamlListIn = rule.n.in
     })
-
-    rulespec.close([
-      // Same or lesser indent: close this list.
-      {
-        s: [IN],
-        c: (rule: Rule, ctx: Context) => {
-          return ctx.t0.val <= rule.n.in
-        },
-        b: 1,
-        g: 'yaml',
-      },
-    ])
+    rulespec.bc((rule: Rule) => {
+      let val = rule.child.node !== undefined ? rule.child.node : null
+      rule.k.yamlBlockArr.push(val)
+    })
   })
 
+  // yamlBlockElem rule: reuse shared array, push child nodes.
+  jsonic.rule('yamlBlockElem', (rulespec: RuleSpec) => {
+    rulespec.bo((rule: Rule) => {
+      rule.node = rule.k.yamlBlockArr
+    })
+    rulespec.bc((rule: Rule) => {
+      let val = rule.child.node !== undefined ? rule.child.node : null
+      rule.k.yamlBlockArr.push(val)
+    })
+  })
 
-  // Amend map rule, treating IN like CA.
+  // list rule: propagate list indent so val can check nesting depth.
+  jsonic.rule('list', (rulespec: RuleSpec) => {
+    rulespec.bo((rule: Rule) => {
+      rule.k.yamlListIn = rule.n.in
+    })
+  })
+
+  // map rule: default indent and merge-key handling.
   jsonic.rule('map', (rulespec: RuleSpec) => {
     rulespec.bo((rule: Rule) => {
-      // Set default indent level for top-level implicit maps.
       if (null == rule.n.in) {
         rule.n.in = 0
       }
-      // Propagate map indent to children so val can check nesting depth.
       rule.k.yamlIn = rule.n.in
     })
-
-    rulespec.open([
-      // Indent at same level continues the map with another pair.
-      {
-        s: [IN],
-        c: (rule: Rule) => rule.o0.val === rule.n.in,
-        r: 'pair',
-        g: 'yaml',
-      },
-    ])
-
-    // Handle merge keys after all pairs are collected.
     rulespec.ac((rule: Rule) => {
       if (rule.node && typeof rule.node === 'object' && '<<' in rule.node) {
         let mergeVal = rule.node['<<']
@@ -2634,198 +2610,27 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
         }
       }
     })
-
-    rulespec.close([
-      // Dedent: indent is smaller than current level => close this map.
-      {
-        s: [IN],
-        c: (rule: Rule, ctx: Context) => {
-          return ctx.t0.val < rule.n.in
-        },
-        b: 1,
-        g: 'yaml',
-      },
-    ])
   })
 
-
-  // Amend pair rule, treating IN like CA after pair.
-  jsonic.rule('pair', (rulespec: RuleSpec) => {
-    rulespec.open([
-      // End of input in pair open: close gracefully.
-      { s: [ZZ], b: 1, g: 'yaml' },
-    ])
-
-
-
-    rulespec.close([
-      // Same indent level: continue with next pair.
-      {
-        s: [IN],
-        c: (rule: Rule, ctx: Context) => {
-          return ctx.t0.val === rule.n.in
-        },
-        r: 'pair',
-        g: 'yaml',
-      },
-
-      // Smaller indent: close this pair (and the map will close too).
-      {
-        s: [IN],
-        c: (rule: Rule, ctx: Context) => {
-          return ctx.t0.val < rule.n.in
-        },
-        b: 1,
-        g: 'yaml',
-      },
-    ])
-  })
-
-
-  // Add a custom rule for YAML element-map: handles "- key: val" patterns.
-  // This rule is pushed by elem when it detects KEY CL after a dash.
-  // It parses key-value pairs and returns the map as elem's child node.
+  // yamlElemMap rule: init map and store pairs.
   jsonic.rule('yamlElemMap', (rulespec: RuleSpec) => {
-    rulespec
-      .bo((rule: Rule) => {
-        rule.node = Object.create(null)
-      })
-      .open([
-        {
-          s: [KEY, CL],
-          p: 'val',
-          a: (rule: Rule) => {
-            rule.u.key = extractKey(rule)
-          },
-          g: 'yaml',
-        },
-      ])
-      .bc((rule: Rule) => {
-        if (rule.u.key != null) {
-          rule.node[rule.u.key] = rule.child.node
-        }
-      })
-      .close([
-        // Same indent as the key: more pairs in this map.
-        {
-          s: [IN],
-          c: (rule: Rule, ctx: Context) => {
-            return ctx.t0.val === rule.k.yamlMapIn
-          },
-          r: 'yamlElemPair',
-          g: 'yaml',
-        },
-        // Different indent or end: close the map.
-        {
-          s: [IN],
-          b: 1,
-          g: 'yaml',
-        },
-        // Flow collection: comma or close bracket/brace ends the map.
-        { s: [CA], b: 1, g: 'yaml' },
-        { s: [CS], b: 1, g: 'yaml' },
-        { s: [CB], b: 1, g: 'yaml' },
-        { s: [ZZ], g: 'yaml' },
-      ])
+    rulespec.bo((rule: Rule) => {
+      rule.node = Object.create(null)
+    })
+    rulespec.bc((rule: Rule) => {
+      if (rule.u.key != null) {
+        rule.node[rule.u.key] = rule.child.node
+      }
+    })
   })
 
-  // Additional pairs in a yamlElemMap.
+  // yamlElemPair rule: store pair into shared map node.
   jsonic.rule('yamlElemPair', (rulespec: RuleSpec) => {
-    rulespec
-      .open([
-        {
-          s: [KEY, CL],
-          p: 'val',
-          a: (rule: Rule) => {
-            rule.u.key = extractKey(rule)
-          },
-          g: 'yaml',
-        },
-      ])
-      .bc((rule: Rule) => {
-        if (rule.u.key != null) {
-          rule.node[rule.u.key] = rule.child.node
-        }
-      })
-      .close([
-        // Same indent: more pairs.
-        {
-          s: [IN],
-          c: (rule: Rule, ctx: Context) => {
-            return ctx.t0.val === rule.k.yamlMapIn
-          },
-          r: 'yamlElemPair',
-          g: 'yaml',
-        },
-        // Different indent or end: close.
-        {
-          s: [IN],
-          b: 1,
-          g: 'yaml',
-        },
-        // Flow collection: comma or close bracket/brace ends the pair.
-        { s: [CA], b: 1, g: 'yaml' },
-        { s: [CS], b: 1, g: 'yaml' },
-        { s: [CB], b: 1, g: 'yaml' },
-        { s: [ZZ], g: 'yaml' },
-      ])
-  })
-
-
-  // Amend elem rule for YAML sequences.
-  jsonic.rule('elem', (rulespec: RuleSpec) => {
-    rulespec.open([
-      // Element value is a key-value map: - key: val
-      {
-        s: [KEY, CL],
-        p: 'yamlElemMap',
-        b: 2,
-        a: (rule: Rule) => {
-          // The map's pairs are indented: list indent + 2 (for "- ").
-          rule.k.yamlMapIn = rule.n.in + 2
-        },
-        g: 'yaml',
-      },
-    ])
-
-    rulespec.close([
-      // Indent followed by element marker: next element at same level.
-      {
-        s: [IN, EL],
-        c: (rule: Rule, ctx: Context) => {
-          return ctx.t0.val === rule.n.in
-        },
-        r: 'elem',
-        g: 'yaml',
-      },
-
-      // Same indent but no element marker: close list (e.g. map key follows).
-      {
-        s: [IN],
-        c: (rule: Rule, ctx: Context) => {
-          return ctx.t0.val === rule.n.in
-        },
-        b: 1,
-        g: 'yaml',
-      },
-
-      // Dedent: close this list.
-      {
-        s: [IN],
-        c: (rule: Rule, ctx: Context) => {
-          return ctx.t0.val < rule.n.in
-        },
-        b: 1,
-        g: 'yaml',
-      },
-
-      // Element marker at top level (no preceding newline).
-      {
-        s: [EL],
-        r: 'elem',
-        g: 'yaml',
-      },
-    ])
+    rulespec.bc((rule: Rule) => {
+      if (rule.u.key != null) {
+        rule.node[rule.u.key] = rule.child.node
+      }
+    })
   })
 
 }

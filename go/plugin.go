@@ -10,6 +10,13 @@ import (
 
 // Yaml is a jsonic plugin that adds YAML parsing support.
 func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
+	// Guard against re-entry during SetOptions's plugin re-application.
+	// Without this, Grammar()/Rule() calls would be duplicated.
+	if j.Decoration("yaml-installed") == true {
+		return nil
+	}
+	j.Decorate("yaml-installed", true)
+
 	TX := j.Token("#TX")
 	NR := j.Token("#NR")
 	ST := j.Token("#ST")
