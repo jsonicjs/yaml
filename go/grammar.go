@@ -294,7 +294,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 
 	// val rule: claim pending anchors (ao), handle empty (bc), resolve
 	// aliases and record anchors (ac), follow replacement chain (bc).
-	j.Rule("val", func(rs *jsonic.RuleSpec) {
+	j.Rule("val", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddAO(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if len(*pendingAnchors) > 0 {
 				anchorsCopy := make([]anchorInfo, len(*pendingAnchors))
@@ -361,7 +361,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		})
 	})
 
-	j.Rule("indent", func(rs *jsonic.RuleSpec) {
+	j.Rule("indent", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if !jsonic.IsUndefined(r.Child.Node) {
 				r.Node = r.Child.Node
@@ -369,7 +369,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		})
 	})
 
-	j.Rule("yamlBlockList", func(rs *jsonic.RuleSpec) {
+	j.Rule("yamlBlockList", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			r.Node = make([]any, 0)
 			r.K["yamlBlockArr"] = r.Node
@@ -388,7 +388,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		})
 	})
 
-	j.Rule("yamlBlockElem", func(rs *jsonic.RuleSpec) {
+	j.Rule("yamlBlockElem", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			r.Node = r.K["yamlBlockArr"]
 		})
@@ -405,13 +405,13 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		})
 	})
 
-	j.Rule("list", func(rs *jsonic.RuleSpec) {
+	j.Rule("list", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			r.K["yamlListIn"] = r.N["in"]
 		})
 	})
 
-	j.Rule("map", func(rs *jsonic.RuleSpec) {
+	j.Rule("map", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if _, ok := r.N["in"]; !ok {
 				r.N["in"] = 0
@@ -449,7 +449,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		})
 	})
 
-	j.Rule("yamlElemMap", func(rs *jsonic.RuleSpec) {
+	j.Rule("yamlElemMap", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			r.Node = make(map[string]any)
 		})
@@ -466,7 +466,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		})
 	})
 
-	j.Rule("yamlElemPair", func(rs *jsonic.RuleSpec) {
+	j.Rule("yamlElemPair", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if key := r.U["key"]; key != nil {
 				if m, ok := r.Node.(map[string]any); ok {

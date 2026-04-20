@@ -40,6 +40,6 @@
     "typescript": "^5.9.3"
   },
   "peerDependencies": {
-    "jsonic": "github:jsonicjs/jsonic#main"
+    "jsonic": "^2.25.1"
   }
 }
