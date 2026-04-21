@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// Embeds yaml-grammar.jsonic into src/yaml.ts and go/grammar.go.
+// Embeds yaml-grammar.jsonic into src/yaml.ts and go/yaml.go.
 // Run via: node embed-grammar.js
 
 const fs = require('fs')
@@ -40,8 +40,8 @@ if (grammar.includes('`')) {
   process.exit(1)
 }
 embed(
-  path.join(__dirname, 'go', 'grammar.go'),
+  path.join(__dirname, 'go', 'yaml.go'),
   'const grammarText = `\n' + grammar + '`'
 )
 
-console.log('Embedded yaml-grammar.jsonic into src/yaml.ts and go/grammar.go')
+console.log('Embedded yaml-grammar.jsonic into src/yaml.ts and go/yaml.go')

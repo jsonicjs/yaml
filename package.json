@@ -40,6 +40,6 @@
     "typescript": "^5.9.3"
   },
   "peerDependencies": {
-    "jsonic": "^2.25.1"
+    "jsonic": ">=2"
   }
 }

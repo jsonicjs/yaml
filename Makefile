@@ -8,7 +8,7 @@ test: test-ts test-go
 
 clean: clean-ts clean-go
 
-# Embed yaml-grammar.jsonic into src/yaml.ts and go/grammar.go.
+# Embed yaml-grammar.jsonic into src/yaml.ts and go/yaml.go.
 embed:
 	node embed-grammar.js
 
