@@ -15,6 +15,84 @@ import (
 // Currently empty — reserved for future extension.
 type YamlOptions struct{}
 
+// Hoisted regex constants — compiling these at package init avoids
+// recompiling them inside per-token hot paths.
+var (
+	structTagPrefixRe   = regexp.MustCompile(`^!!(seq|map|omap|set|pairs|binary|ordered|python/\S*)`)
+	structTagFullLineRe = regexp.MustCompile(`^!!(seq|map|omap|set|pairs|binary|ordered)\s*$`)
+	yamlTagDirectiveRe  = regexp.MustCompile(`^%TAG\s+(\S+)\s+(\S+)`)
+	leadingCommentRe    = regexp.MustCompile(`^[ \t]*#[^\n]*\n`)
+	docStartRe          = regexp.MustCompile(`^---([ \t]+(.+))?(\r?\n|$)`)
+	docEndRe            = regexp.MustCompile(`\n\.\.\.\s*(\r?\n.*)?$`)
+)
+
+// flowScanState caches incremental flow-collection depth and quote state
+// across lex calls so the plain-scalar / newline branches don't rescan
+// the source from index 0 on every token (which would be O(n²) overall).
+//
+// Mirrors the _flowDepth / _flowScanPos / _inDoubleQuote / _inSingleQuote
+// cache in src/yaml.ts.
+type flowScanState struct {
+	depth         int
+	pos           int
+	inDoubleQuote bool
+	inSingleQuote bool
+}
+
+// advance scans src forward from the cached position to target, updating
+// flow-collection depth and quote state. If target < pos the cache is
+// reset (cleanSource may have replaced lex.Src and shortened the cursor).
+func (s *flowScanState) advance(src string, target int) {
+	if target < s.pos {
+		s.depth = 0
+		s.pos = 0
+		s.inDoubleQuote = false
+		s.inSingleQuote = false
+	}
+	for fi := s.pos; fi < target; fi++ {
+		fc := src[fi]
+		if s.inDoubleQuote {
+			if fc == '\\' {
+				fi++
+			} else if fc == '"' {
+				s.inDoubleQuote = false
+			}
+			continue
+		}
+		if s.inSingleQuote {
+			if fc == '\'' {
+				if fi+1 < target && src[fi+1] == '\'' {
+					fi++ // escaped ''
+				} else {
+					s.inSingleQuote = false
+				}
+			}
+			continue
+		}
+		switch fc {
+		case '{', '[':
+			s.depth++
+		case '}', ']':
+			if s.depth > 0 {
+				s.depth--
+			}
+		case '"':
+			s.inDoubleQuote = true
+		case '\'':
+			// Apostrophes preceded by a word char are not quote openers
+			// (matches src/yaml.ts:941-947).
+			if fi > 0 {
+				pc := src[fi-1]
+				if (pc >= 'A' && pc <= 'Z') || (pc >= 'a' && pc <= 'z') || (pc >= '0' && pc <= '9') {
+					continue
+				}
+			}
+			s.inSingleQuote = true
+		}
+	}
+	s.pos = target
+}
+
 // Parse parses a YAML string and returns the resulting Go value.
 // The returned value can be:
 //   - map[string]any for mappings
@@ -237,6 +315,8 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 	tagHandles := make(map[string]string)
 	// Flag to tell the number matcher to skip, so TextCheck handles the value.
 	skipNumberMatch := false
+	// Incremental flow-context cache shared between yamlMatcher and handlePlainScalar.
+	flowState := &flowScanState{}
 
 	cfg := j.Config()
 
@@ -273,7 +353,7 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 		}
 
 		// Plain scalar — scan to end of line, handling multiline continuation.
-		return handlePlainScalar(lex, pnt, src, fwd)
+		return handlePlainScalar(lex, pnt, src, fwd, flowState)
 	}
 
 	// ===== Custom YAML matcher (priority 500000 — before fixed tokens) =====
@@ -283,10 +363,12 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 		pnt := lex.Cursor()
 		src := lex.Src
 
-		// First call: clean source (strip directives, initial ---).
+		// First call: clean source (strip directives, initial ---) and
+		// preprocess flow collections so jsonic core can consume them.
 		if !srcCleaned {
 			srcCleaned = true
 			cleaned := cleanSource(src, tagHandles)
+			cleaned = preprocessFlowCollections(cleaned)
 			if cleaned != src {
 				lex.Src = cleaned
 				pnt.Len = len(cleaned)
@@ -544,8 +626,7 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 			}
 
 			// !!seq, !!map, !!omap, etc. structural tags — skip them.
-			structTagRe := regexp.MustCompile(`^!!(seq|map|omap|set|pairs|binary|ordered|python/\S*)`)
-			if fwd[0] == '!' && len(fwd) > 1 && fwd[1] == '!' && structTagRe.MatchString(fwd) {
+			if fwd[0] == '!' && len(fwd) > 1 && fwd[1] == '!' && structTagPrefixRe.MatchString(fwd) {
 				skip := 2
 				for skip < len(fwd) && fwd[skip] != ' ' && fwd[skip] != '\n' {
 					skip++
@@ -598,7 +679,7 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 			// Explicit key: ? key
 			if fwd[0] == '?' && (len(fwd) < 2 || fwd[1] == ' ' || fwd[1] == '\t' ||
 				fwd[1] == '\n' || fwd[1] == '\r') {
-				return handleExplicitKey(lex, pnt, fwd, &pendingExplicitCL, &pendingTokens, TX, CL, VL)
+				return handleExplicitKey(lex, pnt, fwd, &pendingExplicitCL, &pendingTokens, TX, CL, VL, IN)
 			}
 
 			// Document markers: --- and ...
@@ -660,7 +741,7 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 
 			// Plain scalars starting with digits that contain colons (e.g. 20:03:20).
 			if fwd[0] >= '0' && fwd[0] <= '9' {
-				if tkn := handleNumericColon(lex, pnt, fwd, TX, &skipNumberMatch); tkn != nil {
+				if tkn := handleNumericColon(lex, pnt, fwd, TX, &skipNumberMatch, flowState); tkn != nil {
 					return tkn
 				}
 			}
@@ -707,39 +788,23 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 
 			// Newline handling — YAML indentation is significant.
 			if fwd[0] == '\n' || fwd[0] == '\r' {
-				// Check if we're inside a flow collection.
-				inFlow := 0
-				for fi := 0; fi < pnt.SI; fi++ {
-					fc := lex.Src[fi]
-					if fc == '{' || fc == '[' {
-						inFlow++
-					} else if fc == '}' || fc == ']' {
-						if inFlow > 0 {
-							inFlow--
-						}
-					} else if fc == '"' {
-						fi++
-						for fi < pnt.SI && lex.Src[fi] != '"' {
-							if lex.Src[fi] == '\\' {
-								fi++
-							}
-							fi++
-						}
-					} else if fc == '\'' {
-						fi++
-						for fi < pnt.SI && lex.Src[fi] != '\'' {
-							if fi+1 < pnt.SI && lex.Src[fi] == '\'' && lex.Src[fi+1] == '\'' {
-								fi++
-							}
-							fi++
-						}
-					}
-				}
-				if inFlow > 0 {
+				// Check if we're inside a flow collection (incremental scan).
+				flowState.advance(lex.Src, pnt.SI)
+				if flowState.depth > 0 {
 					// Inside flow collection — consume whitespace.
+					// Bump RI for each consumed newline so error positions stay accurate.
 					pos := 0
+					rows := 0
 					for pos < len(fwd) && (fwd[pos] == '\n' || fwd[pos] == '\r' ||
 						fwd[pos] == ' ' || fwd[pos] == '\t') {
+						if fwd[pos] == '\r' && pos+1 < len(fwd) && fwd[pos+1] == '\n' {
+							pos += 2
+							rows++
+							continue
+						}
+						if fwd[pos] == '\n' || fwd[pos] == '\r' {
+							rows++
+						}
 						pos++
 					}
 					if pos < len(fwd) && fwd[pos] == '#' {
@@ -748,6 +813,7 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 						}
 					}
 					pnt.SI += pos
+					pnt.RI += rows
 					pnt.CI = 0
 					continue
 				}
@@ -871,6 +937,430 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 	return nil
 }
 
+// isWordByte reports whether b is an ASCII letter or digit (used for the
+// apostrophe-in-word check throughout flow preprocessing).
+func isWordByte(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
+}
+
+// needsFlowPreprocess scans src once and returns true only if some `{` or
+// `[` lies at a YAML value position. Fast-path bypass for pure block-style
+// YAML.
+func needsFlowPreprocess(src string) bool {
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		if c == '"' {
+			i++
+			for i < len(src) && src[i] != '"' {
+				if src[i] == '\\' && i+1 < len(src) {
+					i++
+				}
+				i++
+			}
+			continue
+		}
+		if c == '\'' {
+			pc := byte(0)
+			if i > 0 {
+				pc = src[i-1]
+			}
+			if !isWordByte(pc) {
+				i++
+				for i < len(src) {
+					if src[i] == '\'' && i+1 < len(src) && src[i+1] == '\'' {
+						i++
+						i++
+						continue
+					}
+					if src[i] == '\'' {
+						break
+					}
+					i++
+				}
+				continue
+			}
+		}
+		if c == '{' || c == '[' {
+			if isFlowCollectionStart(src, i) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// preprocessFlowCollections rewrites YAML flow collections so that jsonic's
+// core grammar can consume them. Mirrors src/yaml.ts:214-258.
+func preprocessFlowCollections(src string) string {
+	if !needsFlowPreprocess(src) {
+		return src
+	}
+	var out strings.Builder
+	out.Grow(len(src))
+	i := 0
+	for i < len(src) {
+		c := src[i]
+
+		if c == '"' {
+			out.WriteByte(c)
+			i++
+			for i < len(src) && src[i] != '"' {
+				if src[i] == '\\' {
+					out.WriteByte(src[i])
+					i++
+					if i >= len(src) {
+						break
+					}
+				}
+				out.WriteByte(src[i])
+				i++
+			}
+			if i < len(src) {
+				out.WriteByte(src[i])
+				i++
+			}
+			continue
+		}
+
+		if c == '\'' {
+			pc := byte(0)
+			if i > 0 {
+				pc = src[i-1]
+			}
+			if !isWordByte(pc) {
+				out.WriteByte(c)
+				i++
+				for i < len(src) {
+					if src[i] == '\'' && i+1 < len(src) && src[i+1] == '\'' {
+						out.WriteString("''")
+						i += 2
+						continue
+					}
+					if src[i] == '\'' {
+						break
+					}
+					out.WriteByte(src[i])
+					i++
+				}
+				if i < len(src) {
+					out.WriteByte(src[i])
+					i++
+				}
+				continue
+			}
+		}
+
+		if (c == '{' || c == '[') && isFlowCollectionStart(src, i) {
+			text, end := processFlowCollection(src, i)
+			out.WriteString(text)
+			i = end
+			continue
+		}
+
+		out.WriteByte(c)
+		i++
+	}
+	return out.String()
+}
+
+// isFlowCollectionStart reports whether the '{' or '[' byte at src[i]
+// opens a real flow collection. Mirrors src/yaml.ts:262-291.
+func isFlowCollectionStart(src string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	j := i - 1
+	for j >= 0 && (src[j] == ' ' || src[j] == '\t') {
+		j--
+	}
+	if j < 0 {
+		return true
+	}
+	prev := src[j]
+	if prev == '\n' || prev == '\r' {
+		return true
+	}
+	if prev == ':' {
+		return true
+	}
+	if prev == '-' {
+		if j > 0 {
+			pc := src[j-1]
+			if isWordByte(pc) || pc == '_' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// processFlowCollection rewrites a flow collection starting at src[start].
+// Mirrors src/yaml.ts:293-508.
+func processFlowCollection(src string, start int) (string, int) {
+	open := src[start]
+	close := byte('}')
+	if open == '[' {
+		close = ']'
+	}
+	isMap := open == '{'
+
+	var out strings.Builder
+	out.Grow(64)
+	out.WriteByte(open)
+
+	var entryBuf strings.Builder
+	entryHasColon := false
+
+	pushEntryByte := func(b byte) {
+		if isMap {
+			entryBuf.WriteByte(b)
+		} else {
+			out.WriteByte(b)
+		}
+	}
+	pushEntryString := func(s string) {
+		if isMap {
+			entryBuf.WriteString(s)
+		} else {
+			out.WriteString(s)
+		}
+	}
+
+	i := start + 1
+	for i < len(src) {
+		ch := src[i]
+
+		if ch == '{' || ch == '[' {
+			nestedText, nestedEnd := processFlowCollection(src, i)
+			pushEntryString(nestedText)
+			if isMap {
+				entryHasColon = true
+			}
+			i = nestedEnd
+			continue
+		}
+
+		if ch == '"' {
+			var s strings.Builder
+			s.WriteByte('"')
+			i++
+			for i < len(src) && src[i] != '"' {
+				if src[i] == '\\' {
+					s.WriteByte(src[i])
+					i++
+					if i >= len(src) {
+						break
+					}
+					s.WriteByte(src[i])
+					i++
+					continue
+				}
+				if src[i] == '\n' || src[i] == '\r' {
+					if src[i] == '\r' && i+1 < len(src) && src[i+1] == '\n' {
+						i++
+					}
+					s.WriteByte(' ')
+					i++
+					for i < len(src) && (src[i] == ' ' || src[i] == '\t') {
+						i++
+					}
+					continue
+				}
+				s.WriteByte(src[i])
+				i++
+			}
+			if i < len(src) {
+				s.WriteByte('"')
+				i++
+			}
+			pushEntryString(s.String())
+			continue
+		}
+
+		if ch == '\'' {
+			pc := byte(0)
+			if i > 0 {
+				pc = src[i-1]
+			}
+			if isWordByte(pc) {
+				pushEntryByte(ch)
+				i++
+				continue
+			}
+			var s strings.Builder
+			s.WriteByte('\'')
+			i++
+			for i < len(src) {
+				if src[i] == '\'' && i+1 < len(src) && src[i+1] == '\'' {
+					s.WriteString("''")
+					i += 2
+					continue
+				}
+				if src[i] == '\'' {
+					break
+				}
+				if src[i] == '\n' || src[i] == '\r' {
+					if src[i] == '\r' && i+1 < len(src) && src[i+1] == '\n' {
+						i++
+					}
+					s.WriteByte(' ')
+					i++
+					for i < len(src) && (src[i] == ' ' || src[i] == '\t') {
+						i++
+					}
+					continue
+				}
+				s.WriteByte(src[i])
+				i++
+			}
+			if i < len(src) {
+				s.WriteByte('\'')
+				i++
+			}
+			pushEntryString(s.String())
+			continue
+		}
+
+		if ch == '#' {
+			if i > 0 {
+				pp := src[i-1]
+				if pp == ' ' || pp == '\t' || pp == '\n' || pp == '\r' {
+					for i < len(src) && src[i] != '\n' && src[i] != '\r' {
+						i++
+					}
+					pushEntryByte(' ')
+					continue
+				}
+			}
+		}
+
+		if ch == '\n' || ch == '\r' {
+			if ch == '\r' && i+1 < len(src) && src[i+1] == '\n' {
+				i++
+			}
+			i++
+			for i < len(src) && (src[i] == ' ' || src[i] == '\t') {
+				i++
+			}
+			pushEntryByte(' ')
+			continue
+		}
+
+		if isMap && ch == ':' {
+			next := byte(0)
+			if i+1 < len(src) {
+				next = src[i+1]
+			}
+			if next == ' ' || next == '\t' || next == ',' || next == '}' || next == ']' ||
+				next == '\n' || next == '\r' || next == 0 {
+				entryHasColon = true
+				entryBuf.WriteByte(':')
+				i++
+				continue
+			}
+			if i > start+1 {
+				acc := strings.TrimRight(entryBuf.String(), " \t")
+				if strings.HasSuffix(acc, "\"") || strings.HasSuffix(acc, "'") {
+					entryHasColon = true
+				}
+			}
+			entryBuf.WriteByte(':')
+			i++
+			continue
+		}
+
+		if ch == ',' {
+			if isMap {
+				entry := strings.TrimSpace(entryBuf.String())
+				if !entryHasColon && len(entry) > 0 {
+					out.WriteString(entry)
+					out.WriteString(": ~,")
+				} else {
+					out.WriteString(entry)
+					out.WriteByte(',')
+				}
+				entryBuf.Reset()
+				entryHasColon = false
+			} else {
+				out.WriteByte(',')
+			}
+			i++
+			continue
+		}
+
+		if ch == close {
+			if isMap {
+				entry := strings.TrimSpace(entryBuf.String())
+				if !entryHasColon && len(entry) > 0 {
+					out.WriteString(entry)
+					out.WriteString(": ~")
+				} else {
+					out.WriteString(entry)
+				}
+			}
+			out.WriteByte(close)
+			i++
+			return out.String(), i
+		}
+
+		if ch == '?' && i+1 < len(src) && (src[i+1] == ' ' || src[i+1] == '\t') {
+			isEntryStart := false
+			if !isMap {
+				prevContent := strings.TrimRight(out.String(), " \t")
+				if len(prevContent) > 0 {
+					last := prevContent[len(prevContent)-1]
+					isEntryStart = last == '[' || last == ','
+				}
+			} else {
+				isEntryStart = strings.TrimSpace(entryBuf.String()) == ""
+			}
+			if isEntryStart && !isMap {
+				out.WriteByte('{')
+				var inner strings.Builder
+				i += 2
+				for i < len(src) && src[i] != ',' && src[i] != close {
+					if src[i] == '\n' || src[i] == '\r' {
+						if src[i] == '\r' && i+1 < len(src) && src[i+1] == '\n' {
+							i++
+						}
+						inner.WriteByte(' ')
+						i++
+						for i < len(src) && (src[i] == ' ' || src[i] == '\t') {
+							i++
+						}
+						continue
+					}
+					if src[i] == '#' {
+						for i < len(src) && src[i] != '\n' && src[i] != '\r' {
+							i++
+						}
+						continue
+					}
+					inner.WriteByte(src[i])
+					i++
+				}
+				out.WriteString(strings.TrimSpace(inner.String()))
+				out.WriteByte('}')
+				continue
+			}
+			if isEntryStart && isMap {
+				i += 2
+				continue
+			}
+		}
+
+		pushEntryByte(ch)
+		i++
+	}
+
+	if isMap {
+		out.WriteString(entryBuf.String())
+	}
+	out.WriteByte(close)
+	return out.String(), i
+}
+
 // cleanSource strips YAML directives and initial document markers from source.
 func cleanSource(src string, tagHandles map[string]string) string {
 	if len(src) == 0 {
@@ -883,7 +1373,7 @@ func cleanSource(src string, tagHandles map[string]string) string {
 		if dIdx >= 0 {
 			dirBlock := src[:dIdx]
 			for _, dl := range strings.Split(dirBlock, "\n") {
-				tagMatch := regexp.MustCompile(`^%TAG\s+(\S+)\s+(\S+)`).FindStringSubmatch(dl)
+				tagMatch := yamlTagDirectiveRe.FindStringSubmatch(dl)
 				if tagMatch != nil {
 					tagHandles[tagMatch[1]] = tagMatch[2]
 				}
@@ -894,16 +1384,14 @@ func cleanSource(src string, tagHandles map[string]string) string {
 
 	// Strip leading comment lines before ---.
 	for {
-		commentRe := regexp.MustCompile(`^[ \t]*#[^\n]*\n`)
-		if !commentRe.MatchString(src) || !strings.Contains(src, "\n---") {
+		if !leadingCommentRe.MatchString(src) || !strings.Contains(src, "\n---") {
 			break
 		}
-		src = commentRe.ReplaceAllString(src, "")
+		src = leadingCommentRe.ReplaceAllString(src, "")
 	}
 
 	// Handle document start marker (---).
-	docRe := regexp.MustCompile(`^---([ \t]+(.+))?(\r?\n|$)`)
-	docMatch := docRe.FindStringSubmatch(src)
+	docMatch := docStartRe.FindStringSubmatch(src)
 	if docMatch != nil {
 		prefix := ""
 		if len(docMatch) > 2 {
@@ -915,8 +1403,7 @@ func cleanSource(src string, tagHandles map[string]string) string {
 		if len(trimmed) > 0 && (trimmed[0] == '>' || trimmed[0] == '|') {
 			// Leave --- in place for block scalar context.
 		} else if prefix != "" && (len(trimmed) == 0 || trimmed[0] != '#') {
-			structTagRe := regexp.MustCompile(`^!!(seq|map|omap|set|pairs|binary|ordered)\s*$`)
-			if structTagRe.MatchString(trimmed) {
+			if structTagFullLineRe.MatchString(trimmed) {
 				src = rest
 			} else {
 				suffix := ""
@@ -931,9 +1418,8 @@ func cleanSource(src string, tagHandles map[string]string) string {
 	}
 
 	// Handle document end marker (... at end of source).
-	dotRe := regexp.MustCompile(`\n\.\.\.\s*(\r?\n.*)?$`)
-	if dotRe.MatchString(src) {
-		loc := dotRe.FindStringIndex(src)
+	if docEndRe.MatchString(src) {
+		loc := docEndRe.FindStringIndex(src)
 		if loc != nil {
 			src = src[:loc[0]]
 		}
@@ -1335,37 +1821,10 @@ func handleTagInTextCheck(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, tagHan
 }
 
 // handlePlainScalar processes YAML plain scalar values with multiline continuation.
-func handlePlainScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string) *jsonic.LexCheckResult {
-	// Detect flow context.
-	inFlowCtx := false
-	depth := 0
-	for fi := 0; fi < pnt.SI; fi++ {
-		fc := src[fi]
-		if fc == '{' || fc == '[' {
-			depth++
-		} else if fc == '}' || fc == ']' {
-			if depth > 0 {
-				depth--
-			}
-		} else if fc == '"' {
-			fi++
-			for fi < pnt.SI && src[fi] != '"' {
-				if src[fi] == '\\' {
-					fi++
-				}
-				fi++
-			}
-		} else if fc == '\'' {
-			fi++
-			for fi < pnt.SI && src[fi] != '\'' {
-				if fi+1 < pnt.SI && src[fi] == '\'' && src[fi+1] == '\'' {
-					fi++
-				}
-				fi++
-			}
-		}
-	}
-	inFlowCtx = depth > 0
+func handlePlainScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, flowState *flowScanState) *jsonic.LexCheckResult {
+	// Detect flow context (incremental scan, see flowScanState).
+	flowState.advance(src, pnt.SI)
+	inFlowCtx := flowState.depth > 0
 
 	// Find current line indent.
 	lineStartPos := pnt.SI
@@ -1401,7 +1860,7 @@ func handlePlainScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string) *jso
 	rows := 0
 
 	scanLine := func() string {
-		line := ""
+		start := i
 		for i < len(fwd) {
 			c := fwd[i]
 			if c == '\n' || c == '\r' {
@@ -1420,10 +1879,9 @@ func handlePlainScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string) *jso
 			if c == ',' && inFlowCtx {
 				break
 			}
-			line += string(c)
 			i++
 		}
-		return trimRight(line)
+		return trimRight(fwd[start:i])
 	}
 
 	text = scanLine()
@@ -1675,7 +2133,7 @@ func handleTypeTag(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 // handleExplicitKey processes ? key\n: value patterns.
 func handleExplicitKey(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 	pendingExplicitCL *bool, pendingTokens *[]*jsonic.Token,
-	TX, CL, VL jsonic.Tin) *jsonic.Token {
+	TX, CL, VL, IN jsonic.Tin) *jsonic.Token {
 
 	start := 1
 	if len(fwd) > 1 && (fwd[1] == ' ' || fwd[1] == '\t') {
@@ -1785,8 +2243,50 @@ func handleExplicitKey(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 	if hasValue {
 		pnt.SI += valConsumed
 		pnt.RI++
-		pnt.CI = valConsumed - consumed + 1
-		*pendingExplicitCL = true
+		indent := valConsumed - consumed
+		pnt.CI = indent + 1
+
+		// If there's inline content after `: ` on the same line that itself
+		// starts a block mapping/sequence (e.g. `: get:\n      summary: ...`),
+		// emit CL + IN now so the inner block has a proper indent context.
+		// Mirrors src/yaml.ts:1891-1931.
+		needsIndent := false
+		if valConsumed < len(fwd) {
+			nextCh := fwd[valConsumed]
+			if nextCh != '\n' && nextCh != '\r' &&
+				nextCh != '"' && nextCh != '\'' &&
+				nextCh != '[' && nextCh != '{' && nextCh != '!' {
+				// Look for ` ' or ':' at end of line — indicates a block-mapping key.
+				le := valConsumed
+				for le < len(fwd) && fwd[le] != '\n' && fwd[le] != '\r' {
+					le++
+				}
+				for ri := valConsumed; ri < le; ri++ {
+					if fwd[ri] == ':' {
+						nc := byte(0)
+						if ri+1 < len(fwd) {
+							nc = fwd[ri+1]
+						}
+						if nc == ' ' || nc == '\t' || nc == '\n' || nc == '\r' || ri+1 == le {
+							needsIndent = true
+							break
+						}
+					}
+				}
+				// Or sequence indicator `- `.
+				if !needsIndent && nextCh == '-' && valConsumed+1 < len(fwd) &&
+					(fwd[valConsumed+1] == ' ' || fwd[valConsumed+1] == '\t') {
+					needsIndent = true
+				}
+			}
+		}
+		if needsIndent {
+			clTkn := lex.Token("#CL", CL, 1, ": ")
+			inTkn := lex.Token("#IN", IN, indent, "")
+			*pendingTokens = append(*pendingTokens, clTkn, inTkn)
+		} else {
+			*pendingExplicitCL = true
+		}
 	} else {
 		pnt.SI += beforeNewline
 		pnt.CI += beforeNewline
@@ -1881,6 +2381,8 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 	i := 1
 	val := ""
 	escapedUpTo := 0
+	rows := 0
+	lastNewlineEnd := 0
 
 	for i < len(fwd) && fwd[i] != '"' {
 		if fwd[i] == '\\' {
@@ -2009,6 +2511,8 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 					i++
 				}
 				i++
+				rows++
+				lastNewlineEnd = i
 				for i < len(fwd) && (fwd[i] == ' ' || fwd[i] == '\t') {
 					i++
 				}
@@ -2032,6 +2536,8 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 					i++
 				}
 				emptyLines++
+				rows++
+				lastNewlineEnd = i
 				for i < len(fwd) && (fwd[i] == ' ' || fwd[i] == '\t') {
 					i++
 				}
@@ -2053,7 +2559,12 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 	}
 	tkn := lex.Token("#ST", ST, val, fwd[:i])
 	pnt.SI += i
-	pnt.CI += i
+	pnt.RI += rows
+	if rows > 0 {
+		pnt.CI = i - lastNewlineEnd
+	} else {
+		pnt.CI += i
+	}
 	return tkn
 }
 
@@ -2061,6 +2572,8 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 func handleSingleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST jsonic.Tin) *jsonic.Token {
 	i := 1
 	val := ""
+	rows := 0
+	lastNewlineEnd := 0
 	for i < len(fwd) {
 		if fwd[i] == '\'' {
 			if i+1 < len(fwd) && fwd[i+1] == '\'' {
@@ -2082,6 +2595,8 @@ func handleSingleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 					i++
 				}
 				emptyLines++
+				rows++
+				lastNewlineEnd = i
 				for i < len(fwd) && (fwd[i] == ' ' || fwd[i] == '\t') {
 					i++
 				}
@@ -2100,22 +2615,45 @@ func handleSingleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 	}
 	tkn := lex.Token("#ST", ST, val, fwd[:i])
 	pnt.SI += i
-	pnt.CI += i
+	pnt.RI += rows
+	if rows > 0 {
+		pnt.CI = i - lastNewlineEnd
+	} else {
+		pnt.CI += i
+	}
 	return tkn
 }
 
 // handleNumericColon handles plain scalars starting with digits that contain
-// colons (e.g. 20:03:20) or trailing text after a space (e.g. "64 characters, hexadecimal.").
-// The skipNumberMatch parameter is set to true when trailing text is detected,
-// so the NumberCheck callback can skip the number matcher and let TextCheck handle it.
-func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsonic.Tin, skipNumberMatch *bool) *jsonic.Token {
+// colons (e.g. 20:03:20), trailing commas (e.g. 12,), or non-numeric text
+// after a space (e.g. "64 characters, hexadecimal.") — captured before the
+// number matcher grabs just the leading digits. Mirrors src/yaml.ts:2204-2266.
+//
+// skipNumberMatch is set to true when trailing text is detected so the
+// NumberCheck callback skips the number matcher and lets TextCheck handle
+// the scalar (with multiline continuation support).
+func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsonic.Tin, skipNumberMatch *bool, flowState *flowScanState) *jsonic.Token {
 	hasEmbeddedColon := false
 	hasTrailingText := false
+	hasTrailingComma := false
 	pi := 1
 	for pi < len(fwd) && fwd[pi] != '\n' && fwd[pi] != '\r' {
 		if fwd[pi] == ':' && pi+1 < len(fwd) && fwd[pi+1] != ' ' && fwd[pi+1] != '\t' &&
 			fwd[pi+1] != '\n' && fwd[pi+1] != '\r' {
 			hasEmbeddedColon = true
+			break
+		}
+		// Trailing comma at end of line means plain scalar in block context
+		// (e.g. "12,"). In flow context commas are separators followed by
+		// more values on the same line.
+		if fwd[pi] == ',' {
+			ci := pi + 1
+			for ci < len(fwd) && (fwd[ci] == ' ' || fwd[ci] == '\t') {
+				ci++
+			}
+			if ci >= len(fwd) || fwd[ci] == '\n' || fwd[ci] == '\r' {
+				hasTrailingComma = true
+			}
 			break
 		}
 		if fwd[pi] == ' ' || fwd[pi] == '\t' {
@@ -2133,39 +2671,26 @@ func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsoni
 		}
 		pi++
 	}
+	if hasTrailingComma {
+		// Block-context only — in flow context the comma is a real separator.
+		flowState.advance(lex.Src, pnt.SI)
+		if flowState.depth == 0 {
+			end := 0
+			for end < len(fwd) && fwd[end] != ' ' && fwd[end] != '\t' &&
+				fwd[end] != '\n' && fwd[end] != '\r' {
+				end++
+			}
+			text := fwd[:end]
+			tkn := lex.Token("#TX", TX, text, text)
+			pnt.SI += end
+			pnt.CI += end
+			return tkn
+		}
+	}
 	if hasTrailingText {
 		// Check if we're in a flow context — if so, the number is standalone.
-		inFlow := false
-		src := lex.Src
-		flowDepth := 0
-		for fi := 0; fi < pnt.SI; fi++ {
-			c := src[fi]
-			if c == '{' || c == '[' {
-				flowDepth++
-			} else if c == '}' || c == ']' {
-				if flowDepth > 0 {
-					flowDepth--
-				}
-			} else if c == '"' {
-				fi++
-				for fi < pnt.SI && src[fi] != '"' {
-					if src[fi] == '\\' {
-						fi++
-					}
-					fi++
-				}
-			} else if c == '\'' {
-				fi++
-				for fi < pnt.SI && src[fi] != '\'' {
-					if fi+1 < pnt.SI && src[fi] == '\'' && src[fi+1] == '\'' {
-						fi++
-					}
-					fi++
-				}
-			}
-		}
-		inFlow = flowDepth > 0
-		if !inFlow {
+		flowState.advance(lex.Src, pnt.SI)
+		if flowState.depth == 0 {
 			*skipNumberMatch = true
 			return nil
 		}
