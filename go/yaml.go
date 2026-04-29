@@ -37,12 +37,8 @@ type MetaResult struct {
 // Hoisted regex constants — compiling these at package init avoids
 // recompiling them inside per-token hot paths.
 var (
-	structTagPrefixRe   = regexp.MustCompile(`^!!(seq|map|omap|set|pairs|binary|ordered|python/\S*)`)
-	structTagFullLineRe = regexp.MustCompile(`^!!(seq|map|omap|set|pairs|binary|ordered)\s*$`)
-	yamlTagDirectiveRe  = regexp.MustCompile(`^%TAG\s+(\S+)\s+(\S+)`)
-	leadingCommentRe    = regexp.MustCompile(`^[ \t]*#[^\n]*\n`)
-	docStartRe          = regexp.MustCompile(`^---([ \t]+(.+))?(\r?\n|$)`)
-	docEndRe            = regexp.MustCompile(`\n\.\.\.\s*(\r?\n.*)?$`)
+	structTagPrefixRe  = regexp.MustCompile(`^!!(seq|map|omap|set|pairs|binary|ordered|python/\S*)`)
+	yamlTagDirectiveRe = regexp.MustCompile(`^%TAG\s+(\S+)\s+(\S+)`)
 )
 
 // flowScanState caches incremental flow-collection depth and quote state
@@ -56,6 +52,42 @@ type flowScanState struct {
 	pos           int
 	inDoubleQuote bool
 	inSingleQuote bool
+}
+
+// reset clears flow scan state at the start of a new parse.
+func (s *flowScanState) reset() {
+	s.depth = 0
+	s.pos = 0
+	s.inDoubleQuote = false
+	s.inSingleQuote = false
+}
+
+// stripCommentLines removes leading-#-comment lines from src; used by the
+// matcher to detect a comments-only source.
+func stripCommentLines(src string) string {
+	out := src
+	for {
+		end := 0
+		// Skip leading whitespace on this line.
+		for end < len(out) && (out[end] == ' ' || out[end] == '\t') {
+			end++
+		}
+		if end >= len(out) || out[end] != '#' {
+			break
+		}
+		// Find end of line.
+		for end < len(out) && out[end] != '\n' && out[end] != '\r' {
+			end++
+		}
+		if end < len(out) && out[end] == '\r' {
+			end++
+		}
+		if end < len(out) && out[end] == '\n' {
+			end++
+		}
+		out = out[end:]
+	}
+	return out
 }
 
 // advance scans src forward from the cached position to target, updating
@@ -401,21 +433,43 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 	}
 
 	// ===== Custom YAML matcher (priority 500000 — before fixed tokens) =====
-	srcCleaned := false
+	var lastSeenSrc string
+	srcSeen := false
 
 	yamlMatcher := func(lex *jsonic.Lex, _ *jsonic.Rule) *jsonic.Token {
 		pnt := lex.Cursor()
 		src := lex.Src
 
-		// First call: clean source (strip directives, initial ---) and
-		// preprocess flow collections so jsonic core can consume them.
-		if !srcCleaned {
-			srcCleaned = true
-			cleaned := cleanSource(src, tagHandles)
-			// cleaned = preprocessFlowCollections(cleaned)  // disabled — handled by rules
-			if cleaned != src {
-				lex.Src = cleaned
-				pnt.Len = len(cleaned)
+		// First call (or new source on a reused plugin instance): reset
+		// per-parse state. Mirrors the TS first-call setup. The source is
+		// no longer mutated — directives, --- / ... markers, and explicit
+		// keys flow through as #DR / #DS / #DE / #QM tokens.
+		if !srcSeen || src != lastSeenSrc {
+			srcSeen = true
+			lastSeenSrc = src
+			for k := range anchors {
+				delete(anchors, k)
+			}
+			pendingAnchors = pendingAnchors[:0]
+			pendingExplicitCL = false
+			skipNumberMatch = false
+			pendingTokens = pendingTokens[:0]
+			for k := range tagHandles {
+				delete(tagHandles, k)
+			}
+			flowState.reset()
+			streamDocs = nil
+			streamMeta = nil
+			streamCurMeta = nil
+
+			// Empty / whitespace-only / comments-only source: emit one #VL
+			// null so the parser yields nil rather than a parse error.
+			stripped := stripCommentLines(src)
+			if strings.TrimSpace(src) == "" || strings.TrimSpace(stripped) == "" {
+				pnt.Len = 0
+				tkn := lex.Token("#VL", VL, nil, "")
+				pnt.SI = 0
+				return tkn
 			}
 		}
 
@@ -1222,28 +1276,6 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 func isWordByte(b byte) bool {
 	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
 }
-// document markers from source — those flow through as #DR / #DS / #DE
-// tokens consumed by the `stream` rule.
-func cleanSource(src string, tagHandles map[string]string) string {
-	if len(src) == 0 {
-		return src
-	}
-	// Capture %TAG handles from leading directive block (before first ---).
-	if src[0] == '%' {
-		dIdx := strings.Index(src, "\n---")
-		if dIdx >= 0 {
-			dirBlock := src[:dIdx]
-			for _, dl := range strings.Split(dirBlock, "\n") {
-				tagMatch := yamlTagDirectiveRe.FindStringSubmatch(dl)
-				if tagMatch != nil {
-					tagHandles[tagMatch[1]] = tagMatch[2]
-				}
-			}
-		}
-	}
-	return src
-}
-
 // handleBlockScalar processes | and > block scalar indicators.
 func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch byte) *jsonic.LexCheckResult {
 	fold := ch == '>'
