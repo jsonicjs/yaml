@@ -230,7 +230,13 @@ describe('yaml-test-suite', () => {
           )
         }
 
-        if (!deepLooseEqual(actual, expected)) {
+        // The plugin returns an array when the source has multiple
+        // documents and a scalar otherwise. parseExpectedJson only extracts
+        // the first expected document, so for multi-doc inputs we compare
+        // actual[0] (or the scalar itself if there's somehow only one).
+        const actualForCompare = multiDoc && Array.isArray(actual) ? actual[0] : actual
+
+        if (!deepLooseEqual(actualForCompare, expected)) {
           const tag = multiDoc ? ' [first doc only]' : ''
           throw new Error(
             `Mismatch for ${tc.id} (${tc.name})${tag}:\n` +

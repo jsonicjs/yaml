@@ -15,6 +15,17 @@ import {
 
 
 type YamlOptions = {
+  // When true, parse() returns { meta, content } instead of bare content.
+  // - meta is a per-document object {directives, explicit, ended} for single
+  //   docs, or an array of such objects for multi-doc streams.
+  // - content is the same value/array the no-meta path returns.
+  meta?: boolean
+}
+
+type DocMeta = {
+  directives: string[]
+  explicit: boolean
+  ended: boolean
 }
 
 
@@ -36,6 +47,11 @@ const grammarText = `
       { s: ['#IN' '#EL'] c: '@val-indent-eq-parent' p: yamlBlockList a: '@val-set-in-from-o0' g: yaml }
       # End of input means empty value.
       { s: '#ZZ' b: 1 a: '@val-set-null' g: yaml }
+      # Document-frame markers indicate an empty document (or end of doc):
+      # back up so the stream rule sees them; treat value as null.
+      { s: '#DS' b: 1 a: '@val-set-null' g: yaml }
+      { s: '#DE' b: 1 a: '@val-set-null' g: yaml }
+      { s: '#DR' b: 1 a: '@val-set-null' g: yaml }
       # Same or lesser indent after a colon means empty value — backtrack.
       { s: '#IN' b: 1 u: { yamlEmpty: true } g: yaml }
       # This value is a list.
@@ -46,6 +62,10 @@ const grammarText = `
   rule: val: close: {
     alts: [
       { s: '#IN' b: 1 g: yaml }
+      # Document-frame markers terminate val: leave them for the stream rule.
+      { s: '#DS' b: 1 g: yaml }
+      { s: '#DE' b: 1 g: yaml }
+      { s: '#DR' b: 1 g: yaml }
     ]
     inject: { append: false }
   }
@@ -112,8 +132,16 @@ const grammarText = `
   }
 
   # Amend pair rule: end of input ends pair; dedent closes, same-indent repeats.
+  # Also handle YAML flow-mapping shapes Jsonic doesn't have natively:
+  # - implicit null values: {a, b: c}  — KEY followed directly by CA or CB
+  # - explicit-key marker:  {? k : v}  — leading #QM is just consumed
   rule: pair: open: {
     alts: [
+      { s: ['#KEY' '#CA'] a: '@implicit-null-pair' b: 1 g: yaml }
+      { s: ['#KEY' '#CB'] a: '@implicit-null-pair' b: 1 g: yaml }
+      { s: ['#QM' '#KEY' '#CL'] p: val u: { pair: true } a: '@qm-pairkey' g: yaml }
+      { s: ['#QM' '#KEY' '#CA'] a: '@qm-implicit-null-pair' b: 1 g: yaml }
+      { s: ['#QM' '#KEY' '#CB'] a: '@qm-implicit-null-pair' b: 1 g: yaml }
       { s: '#ZZ' b: 1 g: yaml }
     ]
     inject: { append: false }
@@ -153,9 +181,13 @@ const grammarText = `
   ]
 
   # Amend elem rule for YAML sequences ("- key: val" at top level of [ ... ]).
+  # Also handle flow-sequence explicit-key entries: [? k : v] is a single-pair
+  # map element. Eat the leading #QM, then back up KEY+CL so yamlElemMap
+  # consumes them as a normal pair.
   rule: elem: open: {
     alts: [
       { s: ['#KEY' '#CL'] p: yamlElemMap b: 2 a: '@set-map-in' g: yaml }
+      { s: ['#QM' '#KEY' '#CL'] p: yamlElemMap b: 2 a: '@set-map-in' g: yaml }
     ]
     inject: { append: false }
   }
@@ -173,7 +205,7 @@ const grammarText = `
 // --- END EMBEDDED yaml-grammar.jsonic ---
 
 
-const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
+const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
   // Guard against re-entry during options() re-application.
   if ((jsonic as any).__yamlInstalled) return
   ;(jsonic as any).__yamlInstalled = true
@@ -198,6 +230,10 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
   // TAG directive handle mappings (e.g. %TAG !! tag:example.com/).
   // When !! is redefined, built-in type conversion is skipped.
   let tagHandles: Record<string, string> = {}
+  // Per-parse accumulators for the stream rule. Reset on first lex call.
+  let yamlStreamDocs: any[] = []
+  let yamlStreamMeta: DocMeta[] = []
+  let yamlStreamCurMeta: DocMeta | null = null
   // Incremental flow-depth cache for text.check (avoids O(n²) rescan).
   let _flowDepth = 0
   let _flowScanPos = 0
@@ -205,307 +241,40 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
   let _inSingleQuote = false
   let _inDoubleQuote = false
 
-  // Preprocess flow collections for YAML-specific features.
-  // Transforms flow collection content to be Jsonic-compatible:
-  // - Implicit null-valued keys in flow mappings: {a, b: c} → {a: ~, b: c}
-  // - Comments between key and colon: {"foo" # comment\n  :bar} → {"foo" :bar}
-  // - Multiline quoted scalars in flow context: {"multi\n  line"} → {"multi line"}
-  // - Explicit keys (?) inside flow collections
-  function preprocessFlowCollections(src: string): string {
-    let result = ''
-    let i = 0
-
-    while (i < src.length) {
-      // Skip over quoted strings so their contents aren't misidentified
-      // as flow collection starts.
-      if (src[i] === '"') {
-        result += src[i]; i++
-        while (i < src.length && src[i] !== '"') {
-          if (src[i] === '\\') { result += src[i]; i++ }
-          result += src[i]; i++
-        }
-        if (i < src.length) { result += src[i]; i++ }
+  // Bring _flowDepth up to date with `upTo` by scanning lex.src incrementally.
+  // Skips quoted regions so embedded brackets don't mis-count the flow depth.
+  function updateFlowState(src: string, upTo: number) {
+    if (upTo < _flowScanPos) {
+      _flowDepth = 0; _flowScanPos = 0
+      _inSingleQuote = false; _inDoubleQuote = false
+    }
+    for (let fi = _flowScanPos; fi < upTo; fi++) {
+      let fc = src[fi]
+      if (_inDoubleQuote) {
+        if (fc === '\\') fi++
+        else if (fc === '"') _inDoubleQuote = false
         continue
       }
-      if (src[i] === "'") {
-        // Only treat as quote if not preceded by a word char (apostrophe).
-        let pc = i > 0 ? src.charCodeAt(i - 1) : 0
+      if (_inSingleQuote) {
+        if (fc === "'") {
+          if (src[fi + 1] === "'") fi++
+          else _inSingleQuote = false
+        }
+        continue
+      }
+      if (fc === '{' || fc === '[') _flowDepth++
+      else if (fc === '}' || fc === ']') { if (_flowDepth > 0) _flowDepth-- }
+      else if (fc === '"') { _inDoubleQuote = true }
+      else if (fc === "'") {
+        let pc = fi > 0 ? src.charCodeAt(fi - 1) : 0
         if (!((pc >= 65 && pc <= 90) || (pc >= 97 && pc <= 122) || (pc >= 48 && pc <= 57))) {
-          result += src[i]; i++
-          while (i < src.length) {
-            if (src[i] === "'" && src[i + 1] === "'") { result += "''"; i += 2; continue }
-            if (src[i] === "'") break
-            result += src[i]; i++
-          }
-          if (i < src.length) { result += src[i]; i++ }
-          continue
+          _inSingleQuote = true
         }
       }
-      if (src[i] === '{' || src[i] === '[') {
-        // Only treat as flow collection if it's at a value position:
-        // after start of string, after newline+indent, after ": ", after "- ",
-        // or preceded only by whitespace on its line.
-        if (isFlowCollectionStart(src, i)) {
-          let processed = processFlowCollection(src, i)
-          result += processed.text
-          i = processed.end
-          continue
-        }
-      }
-      result += src[i]
-      i++
     }
-    return result
+    _flowScanPos = upTo
   }
 
-  // Determine if { or [ at position i is a flow collection opener.
-  function isFlowCollectionStart(src: string, i: number): boolean {
-    if (i === 0) return true
-    // Look backward to find the preceding meaningful character.
-    let j = i - 1
-    while (j >= 0 && (src[j] === ' ' || src[j] === '\t')) j--
-    if (j < 0) return true
-    let prev = src[j]
-    // After newline: it's a flow collection if it's the first thing on the line.
-    if (prev === '\n' || prev === '\r') return true
-    // After value/element indicators.
-    // NOTE: Do NOT treat a preceding "{", "[", or "," as a flow start signal.
-    // "{" and "[" incorrectly classify plain scalars such as: a{{q}}b
-    // "," at top level is plain scalar text (e.g. "text, [link](url)"),
-    // not a flow separator. Nested collections inside processFlowCollection
-    // are handled recursively without this check.
-    if (prev === ':') return true
-    if (prev === '-') {
-      // Only treat as YAML sequence indicator if preceded by whitespace/newline/start.
-      // A hyphen preceded by word characters is part of a word (e.g. deploy-token-{n}).
-      if (j > 0) {
-        let pc = src.charCodeAt(j - 1)
-        if ((pc >= 65 && pc <= 90) || (pc >= 97 && pc <= 122) ||
-            (pc >= 48 && pc <= 57) || pc === 95) {
-          return false
-        }
-      }
-      return true
-    }
-    return false
-  }
-
-  function processFlowCollection(src: string, start: number): { text: string, end: number } {
-    let open = src[start]
-    let close = open === '{' ? '}' : ']'
-    let isMap = open === '{'
-    let out = open
-    let i = start + 1
-
-    // Track entries in flow mappings to detect implicit null-valued keys.
-    let entryHasColon = false
-    let entryParts: string[] = []
-
-    while (i < src.length) {
-      let ch = src[i]
-
-      // Handle nested flow collections recursively.
-      if (ch === '{' || ch === '[') {
-        let nested = processFlowCollection(src, i)
-        if (isMap) {
-          entryParts.push(nested.text)
-          entryHasColon = true // nested structures count as values
-        } else {
-          out += nested.text
-        }
-        i = nested.end
-        continue
-      }
-
-      // Handle quoted strings.
-      if (ch === '"') {
-        let str = '"'
-        i++
-        while (i < src.length && src[i] !== '"') {
-          if (src[i] === '\\') { str += src[i]; i++ }
-          // Multiline double-quoted string: fold newlines into space.
-          if (src[i] === '\n' || src[i] === '\r') {
-            if (src[i] === '\r' && src[i + 1] === '\n') i++
-            str += ' '
-            i++
-            while (i < src.length && (src[i] === ' ' || src[i] === '\t')) i++
-            continue
-          }
-          str += src[i]
-          i++
-        }
-        if (i < src.length) { str += '"'; i++ }
-        if (isMap) entryParts.push(str)
-        else out += str
-        continue
-      }
-
-      if (ch === "'") {
-        // Only treat as YAML quote if not preceded by a word char (apostrophe check).
-        let pc = i > 0 ? src.charCodeAt(i - 1) : 0
-        if ((pc >= 65 && pc <= 90) || (pc >= 97 && pc <= 122) || (pc >= 48 && pc <= 57)) {
-          // Apostrophe — treat as regular character.
-          if (isMap) entryParts.push(ch)
-          else out += ch
-          i++
-          continue
-        }
-        let str = "'"
-        i++
-        while (i < src.length) {
-          if (src[i] === "'" && src[i + 1] === "'") { str += "''"; i += 2; continue }
-          if (src[i] === "'") break
-          // Multiline single-quoted string: fold newlines into space.
-          if (src[i] === '\n' || src[i] === '\r') {
-            if (src[i] === '\r' && src[i + 1] === '\n') i++
-            str += ' '
-            i++
-            while (i < src.length && (src[i] === ' ' || src[i] === '\t')) i++
-            continue
-          }
-          str += src[i]
-          i++
-        }
-        if (i < src.length) { str += "'"; i++ }
-        if (isMap) entryParts.push(str)
-        else out += str
-        continue
-      }
-
-      // Handle comments: strip them in flow context.
-      if (ch === '#') {
-        // Treat as comment if preceded by whitespace or at start of line.
-        if (i > 0 && (src[i - 1] === ' ' || src[i - 1] === '\t' ||
-            src[i - 1] === '\n' || src[i - 1] === '\r')) {
-          while (i < src.length && src[i] !== '\n' && src[i] !== '\r') i++
-          if (isMap) entryParts.push(' ')
-          else out += ' '
-          continue
-        }
-      }
-
-      // Handle newlines in flow context: fold into space.
-      if (ch === '\n' || ch === '\r') {
-        if (ch === '\r' && src[i + 1] === '\n') i++
-        i++
-        // Skip leading whitespace on continuation line.
-        while (i < src.length && (src[i] === ' ' || src[i] === '\t')) i++
-        if (isMap) entryParts.push(' ')
-        else out += ' '
-        continue
-      }
-
-      // Handle colon (key-value separator in flow mapping).
-      if (isMap && ch === ':' && (src[i + 1] === ' ' || src[i + 1] === '\t' ||
-          src[i + 1] === ',' || src[i + 1] === '}' || src[i + 1] === ']' ||
-          src[i + 1] === '\n' || src[i + 1] === '\r' || src[i + 1] === undefined)) {
-        entryHasColon = true
-        entryParts.push(ch)
-        i++
-        continue
-      }
-
-      // Handle adjacent colon (no space after) as key-value separator in flow.
-      if (isMap && ch === ':' && i > start + 1) {
-        // Check if preceded by a quoted string close in the accumulated parts.
-        let accumulated = entryParts.join('').trimEnd()
-        if (accumulated.endsWith('"') || accumulated.endsWith("'")) {
-          entryHasColon = true
-        }
-        entryParts.push(ch)
-        i++
-        continue
-      }
-
-      // Handle comma: end of entry.
-      if (ch === ',') {
-        if (isMap) {
-          let entry = entryParts.join('').trim()
-          if (!entryHasColon && entry.length > 0) {
-            out += entry + ': ~,'
-          } else {
-            out += entry + ','
-          }
-          entryParts = []
-          entryHasColon = false
-        } else {
-          out += ch
-        }
-        i++
-        continue
-      }
-
-      // Handle closing bracket.
-      if (ch === close) {
-        if (isMap) {
-          let entry = entryParts.join('').trim()
-          if (!entryHasColon && entry.length > 0) {
-            out += entry + ': ~'
-          } else {
-            out += entry
-          }
-        }
-        out += close
-        i++
-        return { text: out, end: i }
-      }
-
-      // Handle explicit key indicator in flow context.
-      // Only at the start of an entry (after open bracket/brace, comma,
-      // or after newline with only whitespace before it).
-      if (ch === '?' && (src[i + 1] === ' ' || src[i + 1] === '\t')) {
-        let isEntryStart = false
-        if (!isMap) {
-          // Check if ? is at entry start position in sequence.
-          let prevContent = out.trimEnd()
-          let lastChar = prevContent[prevContent.length - 1]
-          isEntryStart = lastChar === '[' || lastChar === ','
-        } else {
-          let accumulated = entryParts.join('').trim()
-          isEntryStart = accumulated.length === 0
-        }
-        if (isEntryStart && !isMap) {
-          // Convert [? key : val] → [{key: val}]
-          out += '{'
-          let inner = ''
-          i += 2
-          while (i < src.length && src[i] !== ',' && src[i] !== close) {
-            if (src[i] === '\n' || src[i] === '\r') {
-              if (src[i] === '\r' && src[i + 1] === '\n') i++
-              inner += ' '
-              i++
-              while (i < src.length && (src[i] === ' ' || src[i] === '\t')) i++
-              continue
-            }
-            if (src[i] === '#') {
-              while (i < src.length && src[i] !== '\n' && src[i] !== '\r') i++
-              continue
-            }
-            inner += src[i]
-            i++
-          }
-          out += inner.trim() + '}'
-          continue
-        } else if (isEntryStart && isMap) {
-          // In flow mapping, ? is an explicit key indicator — skip it.
-          i += 2
-          continue
-        }
-      }
-
-      // Regular character.
-      if (isMap) entryParts.push(ch)
-      else out += ch
-      i++
-    }
-
-    // Unclosed collection — return what we have.
-    if (isMap) {
-      out += entryParts.join('')
-    }
-    out += close
-    return { text: out, end: i }
-  }
 
   jsonic.options({
     fixed: {
@@ -917,37 +686,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
 
         // Match text to end of line, stopping at `: `, `:\n`, ` #`, or newline.
         // This handles YAML plain scalars with multiline continuation.
-        // Detect if we're inside a flow collection (brackets/braces).
-        // Use incremental scan: only scan from _flowScanPos to pnt.sI.
-        if (pnt.sI < _flowScanPos) { _flowDepth = 0; _flowScanPos = 0; _inSingleQuote = false; _inDoubleQuote = false }
-        {
-          for (let fi = _flowScanPos; fi < pnt.sI; fi++) {
-            let fc = lex.src[fi]
-            if (_inDoubleQuote) {
-              if (fc === '\\') fi++
-              else if (fc === '"') _inDoubleQuote = false
-              continue
-            }
-            if (_inSingleQuote) {
-              if (fc === "'") {
-                if (lex.src[fi + 1] === "'") fi++ // escaped '' in single-quoted string
-                else _inSingleQuote = false
-              }
-              continue
-            }
-            if (fc === '{' || fc === '[') _flowDepth++
-            else if (fc === '}' || fc === ']') { if (_flowDepth > 0) _flowDepth-- }
-            else if (fc === '"') { _inDoubleQuote = true }
-            else if (fc === "'") {
-              // Only treat as YAML quote if not preceded by a word char (apostrophe check).
-              let pc = fi > 0 ? lex.src.charCodeAt(fi - 1) : 0
-              if (!((pc >= 65 && pc <= 90) || (pc >= 97 && pc <= 122) || (pc >= 48 && pc <= 57))) {
-                _inSingleQuote = true
-              }
-            }
-          }
-          _flowScanPos = pnt.sI
-        }
+        updateFlowState(lex.src as string, pnt.sI)
         let inFlowCtx = _flowDepth > 0
         // Find key indent and determine context for multiline scalars.
         let lineStart = pnt.sI
@@ -1158,6 +897,21 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
   // Register #EL token (not as a fixed token — we match it in yamlMatcher).
   let EL = jsonic.token('#EL')
 
+  // Register #QM token: the YAML `?` explicit-key indicator inside flow
+  // collections. Emitted by yamlMatcher only when in flow context and
+  // followed by whitespace; consumed by pair/elem rule alts below.
+  let QM = jsonic.token('#QM')
+
+  // YAML document-frame tokens, emitted by yamlMatcher at column 0:
+  //   #DS  document start: ---     (with optional inline content following)
+  //   #DE  document end:   ...
+  //   #DR  directive line: %YAML 1.2  /  %TAG !! tag:...
+  // The `stream` rule consumes them; rules apply directives and accumulate
+  // each document's value into the result.
+  let DS = jsonic.token('#DS')
+  let DE = jsonic.token('#DE')
+  let DR = jsonic.token('#DR')
+
   // Flow collection tokens.
   let CA = jsonic.token.CA  // comma
   let CS = jsonic.token.CS  // ]
@@ -1177,144 +931,30 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
           make: (_cfg: Config, _opts: Options) => {
             let cleanedSrc: String | null = null
             return function yamlMatcher(lex: Lex) {
-              // On first call (or when source changes), strip YAML document
-              // markers and directives from lex.src. These must be removed
-              // before lexing because jsonic reverts pnt.sI when a lex
-              // matcher returns undefined.
+              // First call (or when source changes): reset per-parse state.
+              // Document-frame syntax (--- / ... / %YAML / %TAG) is no longer
+              // mutated out of lex.src here — it flows through as #DS / #DE /
+              // #DR tokens consumed by the `stream` rule.
               if (lex.src !== cleanedSrc) {
-                // Reset per-parse state for reused parser instances.
                 anchors = {}
                 pendingAnchors = []
                 pendingExplicitCL = false
                 skipNumberMatch = false
                 pendingTokens = []
                 tagHandles = {}
+                yamlStreamDocs = []
+                yamlStreamMeta = []
+                yamlStreamCurMeta = null
                 _flowDepth = 0
                 _flowScanPos = 0
                 _inSingleQuote = false
                 _inDoubleQuote = false
-                let src: string = '' + lex.src
-                let hadDirective = false
-                // Remove leading directive block: everything before ---
-                // when the source starts with a % directive.
-                if (src[0] === '%') {
-                  let dIdx = src.indexOf('\n---')
-                  if (dIdx >= 0) {
-                    // Parse %TAG directives before stripping.
-                    let dirBlock = src.substring(0, dIdx)
-                    let dirLines = dirBlock.split('\n')
-                    for (let dl of dirLines) {
-                      let tagMatch = dl.match(/^%TAG\s+(\S+)\s+(\S+)/)
-                      if (tagMatch) {
-                        tagHandles[tagMatch[1]] = tagMatch[2]
-                      }
-                    }
-                    hadDirective = true
-                    src = src.substring(dIdx + 1)
-                  }
-                  // If no --- follows the directive, leave the % lines
-                  // for jsonic to error on (invalid YAML).
-                }
-                // Strip leading comment lines (before ---).
-                while (/^[ \t]*#[^\n]*\n/.test(src) && /\n---/.test(src)) {
-                  src = src.replace(/^[ \t]*#[^\n]*\n/, '')
-                }
-                // Strip leading blank lines so --- is at position 0.
-                src = src.replace(/^(\r?\n)+/, '')
-                // Handle document start marker (---).
-                let docMatch = src.match(/^---(?:([ \t]+)(.+))?(\r?\n|$)/)
-                let docStripped = false
-                if (docMatch) {
-                  let prefix = docMatch[2] || ''
-                  let rest = src.substring(docMatch[0].length)
-                  let trimmed = prefix.trimStart()
-                  // Don't strip --- when followed by block scalar indicators
-                  // (> or |) — those need --- context for correct parsing.
-                  if (trimmed[0] === '>' || trimmed[0] === '|') {
-                    // Leave --- in place, just truncate at next document marker.
-                  } else if (prefix && trimmed[0] !== '#') {
-                    // If the inline content is a structural tag (!!map, !!seq,
-                    // !!omap, etc.), strip the tag along with --- since the
-                    // parser handles these structures implicitly.
-                    let structTagMatch = trimmed.match(/^!!(seq|map|omap|set|pairs|binary|ordered)\s*$/)
-                    if (structTagMatch) {
-                      src = rest
-                    } else {
-                      src = prefix + (docMatch[3] || '') + rest
-                    }
-                    docStripped = true
-                  } else {
-                    src = rest
-                    docStripped = true
-                  }
-                }
-                // Truncate at the next document marker (---, ..., or %YAML/%TAG at column 0).
-                // Use a manual search to skip markers inside quoted strings.
-                {
-                  let searchPos = 0
-                  let truncateAt = -1
-                  while (searchPos < src.length) {
-                    // Skip quoted strings.
-                    if (src[searchPos] === '"') {
-                      searchPos++
-                      while (searchPos < src.length && src[searchPos] !== '"') {
-                        if (src[searchPos] === '\\') searchPos++
-                        searchPos++
-                      }
-                      if (searchPos < src.length) searchPos++ // skip closing quote
-                      continue
-                    }
-                    if (src[searchPos] === "'") {
-                      searchPos++
-                      while (searchPos < src.length && src[searchPos] !== "'") {
-                        if (src[searchPos] === "'" && src[searchPos + 1] === "'") searchPos++
-                        searchPos++
-                      }
-                      if (searchPos < src.length) searchPos++ // skip closing quote
-                      continue
-                    }
-                    // Check for document marker at start of line.
-                    if (searchPos > 0 && (src[searchPos - 1] === '\n' || src[searchPos - 1] === '\r')) {
-                      let marker = src.substring(searchPos, searchPos + 3)
-                      let after = src[searchPos + 3]
-                      if ((marker === '---' || marker === '...') &&
-                          (after === ' ' || after === '\t' || after === '\n' ||
-                           after === '\r' || after === undefined)) {
-                        truncateAt = searchPos
-                        break
-                      }
-                    }
-                    searchPos++
-                  }
-                  if (truncateAt > 0) {
-                    src = src.substring(0, truncateAt)
-                  }
-                }
-                // After stripping first ---, if remaining is just another ---
-                // or ..., the document is empty.
-                if (docStripped && /^(---|\.\.\.)(\s|$)/.test(src)) {
-                  src = ''
-                }
-                // Preprocess flow collections for YAML-specific features
-                // that Jsonic's core parser doesn't handle natively:
-                // - Implicit null-valued keys in flow mappings: {a, b: c}
-                // - Comments between key and colon: {"foo" # comment\n  :bar}
-                // - Multiline plain/quoted scalars in flow context
-                // - Explicit keys (?) inside flow collections
-                src = preprocessFlowCollections(src)
-
-                lex.src = src
                 cleanedSrc = lex.src
-                lex.pnt.len = src.length
-                lex.refwd()
-                // If source is empty/whitespace/comments-only after preprocessing,
-                // return a VL null token so jsonic resolves to null instead of
-                // creating a #BD error. Only do this when source doesn't start
-                // with an unprocessed % directive (those should error).
+                // Empty / whitespace-only / comments-only source: emit one
+                // null #VL so the parser yields `null` rather than an error.
+                let src = '' + lex.src
                 let stripped = src.replace(/^[ \t]*#[^\n]*(\n|$)/gm, '').trim()
-                if (src[0] !== '%' &&
-                    (src.trim() === '' || stripped === '' ||
-                     /^\.\.\.(?:[ \t]|$)/.test(stripped))) {
+                if (src.trim() === '' || stripped === '') {
                   lex.pnt.len = 0
                   let tkn = lex.token('#VL', null, '', lex.pnt)
                   lex.pnt.sI = 0
@@ -1509,28 +1149,19 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 continue yamlMatchLoop
               }
 
-              // YAML directive lines (%YAML, %TAG, %FOO): skip everything
-              // up to the next --- or ... document marker.
-              if (fwd[0] === '%') {
+              // YAML directive line (%YAML, %TAG, %FOO) at column 0: emit a
+              // #DR token whose val is the raw directive text. The stream rule
+              // applies the directive (e.g. %TAG handle registration) at parse
+              // time via the @apply-directive action.
+              if ((pnt.sI === 0 || lex.src[pnt.sI - 1] === '\n' ||
+                   lex.src[pnt.sI - 1] === '\r') && fwd[0] === '%') {
                 let pos = 0
-                while (pos < fwd.length) {
-                  // Check if current line starts with --- or ...
-                  if ((fwd[pos] === '-' && fwd[pos+1] === '-' && fwd[pos+2] === '-' &&
-                       (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' || fwd[pos+3] === ' ' || fwd[pos+3] === '\t' || fwd[pos+3] === undefined)) ||
-                      (fwd[pos] === '.' && fwd[pos+1] === '.' && fwd[pos+2] === '.' &&
-                       (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' || fwd[pos+3] === ' ' || fwd[pos+3] === '\t' || fwd[pos+3] === undefined))) {
-                    break
-                  }
-                  // Skip this line.
-                  while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
-                  if (fwd[pos] === '\r') pos++
-                  if (fwd[pos] === '\n') pos++
-                  pnt.rI++
-                }
+                while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
+                let directiveSrc = fwd.substring(0, pos)
                 pnt.sI += pos
-                pnt.cI = 0
-                fwd = lex.refwd()
-                // Fall through — next thing should be --- or content.
+                pnt.cI += pos
+                let tkn = lex.token('#DR', directiveSrc, directiveSrc, lex.pnt)
+                return tkn
               }
 
               // YAML non-specific tag (! value) or local tag (!name value):
@@ -1731,6 +1362,18 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 pnt.sI += valEnd
                 pnt.cI += valEnd
                 return tkn
+              }
+
+              // Flow-context `?` explicit-key marker: emit a #QM token so
+              // pair/elem rule alts can handle it. Block-context `?` falls
+              // through to the heavyweight handler below.
+              if (fwd[0] === '?' && (fwd[1] === ' ' || fwd[1] === '\t')) {
+                updateFlowState(lex.src as string, pnt.sI)
+                if (_flowDepth > 0) {
+                  let tkn = lex.token('#QM', undefined, '?', lex.pnt)
+                  pnt.sI += 1; pnt.cI += 1
+                  return tkn
+                }
               }
 
               // YAML explicit key indicator: ? key\n: value
@@ -1943,109 +1586,43 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                 return tkn
               }
 
-              // YAML document markers: --- and ...
-              // --- starts a document (skip it), ... ends the document.
-              if ((fwd[0] === '-' && fwd[1] === '-' && fwd[2] === '-' &&
-                   (fwd[3] === '\n' || fwd[3] === '\r' || fwd[3] === ' ' || fwd[3] === '\t' || fwd[3] === undefined)) ||
-                  (fwd[0] === '.' && fwd[1] === '.' && fwd[2] === '.' &&
-                   (fwd[3] === '\n' || fwd[3] === '\r' || fwd[3] === ' ' || fwd[3] === '\t' || fwd[3] === undefined))) {
-                // Consume the marker and rest of line.
+              // YAML document-frame markers at column 0:
+              //   --- → emit #DS (document start)
+              //   ... → emit #DE (document end)
+              // The handler also consumes trailing whitespace, optional `#`
+              // comment, and the newline ending the marker line — so the next
+              // matcher call lands directly on the next document's content
+              // (no spurious #IN gets emitted between #DS and the content).
+              // Inline content on the same line as the marker (--- foo) is
+              // left in place for the next call.
+              if ((pnt.sI === 0 || lex.src[pnt.sI - 1] === '\n' ||
+                   lex.src[pnt.sI - 1] === '\r') &&
+                  ((fwd[0] === '-' && fwd[1] === '-' && fwd[2] === '-' &&
+                    (fwd[3] === '\n' || fwd[3] === '\r' ||
+                     fwd[3] === ' ' || fwd[3] === '\t' || fwd[3] === undefined)) ||
+                   (fwd[0] === '.' && fwd[1] === '.' && fwd[2] === '.' &&
+                    (fwd[3] === '\n' || fwd[3] === '\r' ||
+                     fwd[3] === ' ' || fwd[3] === '\t' || fwd[3] === undefined)))) {
+                let isEnd = fwd[0] === '.'
                 let pos = 3
-                while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
-                if (fwd[0] === '.') {
-                  // ... terminates: consume and signal end.
-                  pnt.sI += pos
-                  pnt.cI += pos
-                  // Also consume any trailing newlines.
-                  while (pnt.sI < lex.src.length &&
-                    (lex.src[pnt.sI] === '\n' || lex.src[pnt.sI] === '\r')) {
-                    if (lex.src[pnt.sI] === '\r') pnt.sI++
-                    if (lex.src[pnt.sI] === '\n') pnt.sI++
-                    pnt.rI++
-                  }
-                  let tkn = lex.token('#ZZ', undefined, '', lex.pnt)
-                  pnt.end = tkn
-                  return tkn
-                } else {
-                  // --- handler: check if there's content on the same line.
-                  let afterDash = 3
-                  while (afterDash < fwd.length && fwd[afterDash] === ' ') afterDash++
-                  let restOfLine = fwd.substring(afterDash).split(/[\r\n]/)[0].trim()
-
-                  // Check if there's inline content after ---.
-                  // Anchors (&), tags (!), and empty/comment lines go through
-                  // the normal --- handler. Everything else is inline content.
-                  let dashNextCh = afterDash < fwd.length ? fwd[afterDash] : ''
-                  let hasInlineValue = (
-                    dashNextCh !== '' && dashNextCh !== '\n' && dashNextCh !== '\r' &&
-                    dashNextCh !== '&' && dashNextCh !== '!' && dashNextCh !== '#'
-                  )
-                  if (hasInlineValue) {
-                    // Content after --- (e.g. --- |, --- "foo", --- text)
-                    pnt.sI += afterDash
-                    pnt.cI = afterDash
-                    fwd = lex.refwd()
-                    // Fall through to continue matching.
-                  } else {
-                    // Plain --- with nothing (or just a comment) after it.
-                    pnt.sI += pos
-                    pnt.rI++
-                    // Consume newline after ---.
-                    if (pnt.sI < lex.src.length && lex.src[pnt.sI] === '\r') pnt.sI++
-                    if (pnt.sI < lex.src.length && lex.src[pnt.sI] === '\n') pnt.sI++
-                    // Count spaces.
-                    let spaces = 0
-                    while (pnt.sI + spaces < lex.src.length && lex.src[pnt.sI + spaces] === ' ') spaces++
-                    pnt.sI += spaces
-                    pnt.cI = spaces
-                    // If nothing left after ---, emit #ZZ.
-                    if (pnt.sI >= lex.src.length) {
-                      let tkn = lex.token('#ZZ', undefined, '', lex.pnt)
-                      pnt.end = tkn
-                      return tkn
-                    }
-                    // For flow/scalar indicators, don't emit #IN.
-                    let nextCh = lex.src[pnt.sI]
-                    if (nextCh === '{' || nextCh === '[' ||
-                        nextCh === '"' || nextCh === "'") {
-                      fwd = lex.refwd()
-                      // Fall through to continue matching.
-                    } else if (spaces === 0 && nextCh !== '-' && nextCh !== '.' &&
-                               nextCh !== '?' && nextCh !== '\n' && nextCh !== '\r') {
-                      // For indent 0 with simple content (not list/map),
-                      // skip #IN and fall through directly to content.
-                      fwd = lex.refwd()
-                      // Fall through to continue matching.
-                    } else {
-                      // Emit #IN with the indent level after ---.
-                      let src = fwd.substring(0, pos + 1 + spaces)
-                      let tkn = lex.token('#IN', spaces, src, lex.pnt)
-                      return tkn
-                    }
-                  }
-                }
-              }
-
-              // Re-check for patterns that may appear after --- fall-through.
-              // Directive lines: skip everything up to --- or content.
-              if (fwd[0] === '%') {
-                let pos = 0
-                while (pos < fwd.length) {
-                  if ((fwd[pos] === '-' && fwd[pos+1] === '-' && fwd[pos+2] === '-' &&
-                       (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' || fwd[pos+3] === ' ' || fwd[pos+3] === '\t' || fwd[pos+3] === undefined)) ||
-                      (fwd[pos] === '.' && fwd[pos+1] === '.' && fwd[pos+2] === '.' &&
-                       (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' || fwd[pos+3] === ' ' || fwd[pos+3] === '\t' || fwd[pos+3] === undefined))) {
-                    break
-                  }
+                while (pos < fwd.length && (fwd[pos] === ' ' || fwd[pos] === '\t')) pos++
+                let hasInline = pos < fwd.length &&
+                  fwd[pos] !== '\n' && fwd[pos] !== '\r' && fwd[pos] !== '#'
+                if (!hasInline) {
+                  // Skip a trailing comment, then the line terminator.
                   while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
                   if (fwd[pos] === '\r') pos++
-                  if (fwd[pos] === '\n') pos++
-                  pnt.rI++
+                  if (fwd[pos] === '\n') { pos++; pnt.rI++ }
+                  pnt.cI = 1  // column 1 at start of next line
+                } else {
+                  pnt.cI += pos
                 }
                 pnt.sI += pos
-                pnt.cI = 0
-                fwd = lex.refwd()
+                let tkn = lex.token(isEnd ? '#DE' : '#DS', undefined,
+                                    fwd.substring(0, 3), lex.pnt)
+                return tkn
               }
+
               // Non-specific tag.
               if (fwd[0] === '!' && fwd[1] === ' ') {
                 let valStart = 2
@@ -2206,6 +1783,8 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               // (e.g. "64 characters, hexadecimal.") must be captured before
               // jsonic's number matcher grabs just the digits.
               if (fwd[0] >= '0' && fwd[0] <= '9') {
+                updateFlowState(lex.src as string, pnt.sI)
+                let inFlow = _flowDepth > 0
                 let hasEmbeddedColon = false
                 let hasTrailingText = false
                 let hasTrailingComma = false
@@ -2217,12 +1796,12 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                     break
                   }
                   // Trailing comma at end of line means plain scalar in block
-                  // context (e.g. "12,"). In flow context commas are separators
-                  // and are followed by more values on the same line.
+                  // context (e.g. "12,"). In flow context commas are always
+                  // separators, so don't treat the digits as a plain scalar.
                   if (fwd[pi] === ',') {
                     let ci = pi + 1
                     while (ci < fwd.length && (fwd[ci] === ' ' || fwd[ci] === '\t')) ci++
-                    if (ci >= fwd.length || fwd[ci] === '\n' || fwd[ci] === '\r') {
+                    if (!inFlow && (ci >= fwd.length || fwd[ci] === '\n' || fwd[ci] === '\r')) {
                       hasTrailingComma = true
                     }
                     break
@@ -2287,11 +1866,28 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
               if (fwd[0] === ':' && fwd[1] !== ' ' && fwd[1] !== '\t' &&
                   fwd[1] !== '\n' && fwd[1] !== '\r' && fwd[1] !== undefined) {
                 // JSON-compatible flow colon: only when preceded by a quoted string.
-                // e.g. {"key":value} — the char before ':' must be '"' or "'".
-                // Also skip whitespace/newlines (flow context allows multiline).
+                // Skip whitespace/newlines and any intervening line comments
+                // (`# ...` to end-of-line) so e.g. `"foo" # c\n :bar` works.
                 let prevI = pnt.sI - 1
-                while (prevI >= 0 && (lex.src[prevI] === ' ' || lex.src[prevI] === '\t' ||
-                       lex.src[prevI] === '\n' || lex.src[prevI] === '\r')) prevI--
+                while (prevI >= 0) {
+                  let pc = lex.src[prevI]
+                  if (pc === ' ' || pc === '\t' || pc === '\n' || pc === '\r') {
+                    prevI--; continue
+                  }
+                  // If on a line whose `#` is preceded by whitespace, that's a
+                  // comment — jump to before the `#` and keep walking back.
+                  let lineStart = prevI
+                  while (lineStart > 0 && lex.src[lineStart - 1] !== '\n' &&
+                         lex.src[lineStart - 1] !== '\r') lineStart--
+                  let hashAt = -1
+                  for (let li = lineStart; li <= prevI; li++) {
+                    if (lex.src[li] === '#' &&
+                        (li === lineStart || lex.src[li - 1] === ' ' ||
+                         lex.src[li - 1] === '\t')) { hashAt = li; break }
+                  }
+                  if (hashAt >= 0) { prevI = hashAt - 1; continue }
+                  break
+                }
                 if (prevI >= 0 && (lex.src[prevI] === '"' || lex.src[prevI] === "'")) {
                   isFlowColon = true
                 }
@@ -2313,35 +1909,8 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
 
               // Match any newline — YAML indentation is significant.
               // In flow context, newlines are just whitespace — don't emit #IN.
-              // Detect flow context by counting unmatched brackets before current position.
               if (fwd[0] === '\n' || fwd[0] === '\r') {
-                // Reuse incremental flow-depth cache.
-                if (pnt.sI < _flowScanPos) { _flowDepth = 0; _flowScanPos = 0; _inSingleQuote = false; _inDoubleQuote = false }
-                for (let fi = _flowScanPos; fi < pnt.sI; fi++) {
-                  let fc = lex.src[fi]
-                  if (_inDoubleQuote) {
-                    if (fc === '\\') fi++
-                    else if (fc === '"') _inDoubleQuote = false
-                    continue
-                  }
-                  if (_inSingleQuote) {
-                    if (fc === "'") {
-                      if (lex.src[fi + 1] === "'") fi++
-                      else _inSingleQuote = false
-                    }
-                    continue
-                  }
-                  if (fc === '{' || fc === '[') _flowDepth++
-                  else if (fc === '}' || fc === ']') { if (_flowDepth > 0) _flowDepth-- }
-                  else if (fc === '"') { _inDoubleQuote = true }
-                  else if (fc === "'") {
-                    let pc = fi > 0 ? lex.src.charCodeAt(fi - 1) : 0
-                    if (!((pc >= 65 && pc <= 90) || (pc >= 97 && pc <= 122) || (pc >= 48 && pc <= 57))) {
-                      _inSingleQuote = true
-                    }
-                  }
-                }
-                _flowScanPos = pnt.sI
+                updateFlowState(lex.src as string, pnt.sI)
                 if (_flowDepth > 0) {
                   // Inside flow collection — consume whitespace, don't emit #IN.
                   let pos = 0
@@ -2431,6 +2000,48 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
                   return tkn
                 }
 
+                // If the next line is a document-frame marker (--- / ...) at
+                // column 0, advance to it without emitting #IN. The next
+                // matcher call will emit the corresponding #DS / #DE token.
+                if (spaces === 0 &&
+                    ((fwd[pos] === '-' && fwd[pos+1] === '-' && fwd[pos+2] === '-' &&
+                      (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' ||
+                       fwd[pos+3] === ' ' || fwd[pos+3] === '\t' ||
+                       fwd[pos+3] === undefined)) ||
+                     (fwd[pos] === '.' && fwd[pos+1] === '.' && fwd[pos+2] === '.' &&
+                      (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' ||
+                       fwd[pos+3] === ' ' || fwd[pos+3] === '\t' ||
+                       fwd[pos+3] === undefined)))) {
+                  pnt.sI += pos
+                  pnt.rI += rows
+                  pnt.cI = 0
+                  fwd = lex.refwd()
+                  continue yamlMatchLoop
+                }
+
+                // Likewise if the next line is a directive (%YAML / %TAG):
+                // advance and let the next call emit #DR.
+                if (spaces === 0 && fwd[pos] === '%') {
+                  pnt.sI += pos
+                  pnt.rI += rows
+                  pnt.cI = 0
+                  fwd = lex.refwd()
+                  continue yamlMatchLoop
+                }
+
+                // Skip #IN when the next content is a flow indicator or quoted
+                // string at column 0 — there's no block to indent into. Match
+                // the previous behavior of the inline `--- foo` handler.
+                if (spaces === 0 &&
+                    (fwd[pos] === '{' || fwd[pos] === '[' ||
+                     fwd[pos] === '"' || fwd[pos] === "'")) {
+                  pnt.sI += pos
+                  pnt.rI += rows
+                  pnt.cI = 0
+                  fwd = lex.refwd()
+                  continue yamlMatchLoop
+                }
+
                 // Emit #IN with val = indent level of the last non-blank line.
                 let src = fwd.substring(0, pos)
                 let tkn = lex.token('#IN', spaces, src, lex.pnt)
@@ -2451,14 +2062,13 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
 
 
   // Extract a key value from a token, resolving aliases.
-  function extractKey(rule: Rule): any {
-    let o0 = rule.o0
-    if (VL === o0.tin && o0.val && typeof o0.val === 'object' && o0.val.__yamlAlias) {
+  function extractKey(rule: Rule, tkn: Token = rule.o0): any {
+    if (VL === tkn.tin && tkn.val && typeof tkn.val === 'object' && tkn.val.__yamlAlias) {
       // Alias used as key — resolve to anchor value.
-      let name = o0.val.__yamlAlias
+      let name = tkn.val.__yamlAlias
       return anchors[name] !== undefined ? anchors[name] : '*' + name
     }
-    return ST === o0.tin || TX === o0.tin ? o0.val : o0.src
+    return ST === tkn.tin || TX === tkn.tin ? tkn.val : tkn.src
   }
 
   // Function refs used by the declarative grammar (yaml-grammar.jsonic).
@@ -2487,6 +2097,18 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
     '@o0-eq-in': (rule: Rule) => rule.o0.val === rule.n.in,
     '@t0-eq-map-in': (rule: Rule, ctx: Context) => ctx.t0.val === rule.k.yamlMapIn,
     '@elem-key': (rule: Rule) => { rule.u.key = extractKey(rule) },
+    '@implicit-null-pair': (rule: Rule) => {
+      let key = extractKey(rule)
+      rule.u.key = key
+      rule.node[key] = null
+    },
+    // Same as @pairkey, but the KEY is at o1 (after the leading #QM).
+    '@qm-pairkey': (rule: Rule) => { rule.u.key = extractKey(rule, rule.o1) },
+    '@qm-implicit-null-pair': (rule: Rule) => {
+      let key = extractKey(rule, rule.o1)
+      rule.u.key = key
+      rule.node[key] = null
+    },
   }
 
   // Parse the embedded grammar text and install declarative rules.
@@ -2583,6 +2205,125 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
     })
   })
 
+  // ===== stream rule: top-level YAML document collector =====
+  // The stream rule replaces `val` as the parser's start rule. It consumes
+  // doc-frame tokens (#DS, #DE, #DR) emitted by yamlMatcher, pushes a fresh
+  // `val` rule for each document's content, and accumulates the results.
+  // Final shape:
+  //   - 0 docs (empty source) → undefined
+  //   - 1 doc                  → the single value
+  //   - >1 docs                → array of values
+  const ensureCurMeta = () => {
+    if (!yamlStreamCurMeta) {
+      yamlStreamCurMeta = { directives: [], explicit: false, ended: false }
+    }
+  }
+  const flushCurMeta = (ended: boolean) => {
+    ensureCurMeta()
+    yamlStreamCurMeta!.ended = ended || yamlStreamCurMeta!.ended
+    yamlStreamMeta.push(yamlStreamCurMeta!)
+    yamlStreamCurMeta = null
+  }
+  const accumChildDoc = (rule: Rule) => {
+    if (rule.child && rule.child.node !== undefined) {
+      yamlStreamDocs.push(rule.child.node)
+    } else {
+      yamlStreamDocs.push(null)
+    }
+    // The matched close-phase token tells us whether this doc ended
+    // explicitly with `...`.
+    flushCurMeta(rule.c0 != null && rule.c0.tin === DE)
+  }
+  const finalizeStream = (rule: Rule, ctx: Context) => {
+    if (rule.child && rule.child.node !== undefined) {
+      yamlStreamDocs.push(rule.child.node)
+      flushCurMeta(false)
+    }
+    let content: any
+    if (yamlStreamDocs.length === 0) {
+      content = undefined
+    } else if (yamlStreamDocs.length === 1) {
+      content = yamlStreamDocs[0]
+    } else {
+      content = yamlStreamDocs.slice()
+    }
+    let result: any = content
+    if (options.meta) {
+      let meta: any
+      if (yamlStreamMeta.length === 0) {
+        meta = undefined
+      } else if (yamlStreamMeta.length === 1) {
+        meta = yamlStreamMeta[0]
+      } else {
+        meta = yamlStreamMeta.slice()
+      }
+      result = { meta, content }
+    }
+    rule.node = result
+    // Rotation via `r: stream` creates a chain; ctx.root() is the original
+    // stream the parser hands back. Write the result there.
+    ctx.root().node = result
+  }
+  const applyDirective = (rule: Rule) => {
+    let src: string = rule.o0.src || ''
+    let m = src.match(/^%TAG\s+(\S+)\s+(\S+)/)
+    if (m) tagHandles[m[1]] = m[2]
+    ensureCurMeta()
+    yamlStreamCurMeta!.directives.push(src)
+  }
+  const markExplicit = (_rule: Rule) => {
+    ensureCurMeta()
+    yamlStreamCurMeta!.explicit = true
+  }
+  const pushEmptyDoc = (_rule: Rule) => {
+    yamlStreamDocs.push(null)
+    flushCurMeta(true)
+  }
+
+  jsonic.rule('stream', (rs: RuleSpec) => {
+    rs.open([
+      // Consume directive line; rotate to stream to look for the next token.
+      { s: '#DR', a: applyDirective, r: 'stream', g: 'yaml' },
+      // Explicit doc start: push val for the document content.
+      { s: '#DS', a: markExplicit, p: 'val', g: 'yaml' },
+      // ... before any content: count as empty doc, look for more.
+      { s: '#DE', a: pushEmptyDoc, r: 'stream', g: 'yaml' },
+      // Empty source: end immediately (stream.close will run).
+      { s: '#ZZ', b: 1, g: 'yaml' },
+      // Implicit first doc.
+      { p: 'val', g: 'yaml' },
+    ])
+    rs.close([
+      // End of input: accumulate last doc, finalize result shape.
+      { s: '#ZZ', a: finalizeStream, g: 'yaml' },
+      // Directive between docs: accumulate previous doc, apply, continue.
+      { s: '#DR', a: (r: Rule) => { accumChildDoc(r); applyDirective(r) },
+        r: 'stream', g: 'yaml' },
+      // ... terminator: accumulate, look for next doc.
+      { s: '#DE', a: accumChildDoc, r: 'stream', g: 'yaml' },
+      // --- start of next doc (back up so stream.open consumes it).
+      { s: '#DS', b: 1, a: accumChildDoc, r: 'stream', g: 'yaml' },
+    ])
+  })
+
+  // Configure jsonic to start parsing with `stream` instead of `val`.
+  jsonic.options({ rule: { start: 'stream' } })
+
+  // Make every block/flow rule yield to the stream rule when it sees a
+  // doc-frame marker. Rules back up the marker so the stream rule can
+  // accumulate the doc and process the next one.
+  for (const ruleName of ['map', 'list', 'pair', 'elem',
+                          'yamlBlockList', 'yamlBlockElem',
+                          'yamlElemMap', 'yamlElemPair']) {
+    jsonic.rule(ruleName, (rs: RuleSpec) => {
+      rs.close([
+        { s: '#DS', b: 1, g: 'yaml' },
+        { s: '#DE', b: 1, g: 'yaml' },
+        { s: '#DR', b: 1, g: 'yaml' },
+      ])
+    })
+  }
+
   // map rule: default indent and merge-key handling.
   jsonic.rule('map', (rulespec: RuleSpec) => {
     rulespec.bo((rule: Rule) => {
@@ -2637,6 +2378,7 @@ const Yaml: Plugin = (jsonic: Jsonic, _options: YamlOptions) => {
 
 
 Yaml.defaults = ({
+  meta: false,
 } as YamlOptions)
 
 
