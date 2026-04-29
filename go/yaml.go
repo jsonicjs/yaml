@@ -13,7 +13,26 @@ import (
 
 // YamlOptions configures the YAML parser plugin.
 // Currently empty — reserved for future extension.
-type YamlOptions struct{}
+type YamlOptions struct {
+	// When true, Parse returns a struct {Meta, Content} instead of bare
+	// content. Mirrors the TypeScript `meta` option.
+	Meta bool
+}
+
+// DocMeta holds per-document metadata captured by the stream rule.
+type DocMeta struct {
+	Directives []string `json:"directives"`
+	Explicit   bool     `json:"explicit"`
+	Ended      bool     `json:"ended"`
+}
+
+// MetaResult is the return shape when YamlOptions.Meta is true.
+// Meta is either a *DocMeta (single doc) or []*DocMeta (multi-doc).
+// Content is either the doc value (single) or []any (multi-doc).
+type MetaResult struct {
+	Meta    any `json:"meta"`
+	Content any `json:"content"`
+}
 
 // Hoisted regex constants — compiling these at package init avoids
 // recompiling them inside per-token hot paths.
@@ -107,7 +126,12 @@ func Parse(src string) (any, error) {
 }
 
 // MakeJsonic creates a jsonic instance configured for YAML parsing.
+// If a YamlOptions is passed, its fields are propagated to the plugin.
 func MakeJsonic(opts ...YamlOptions) *jsonic.Jsonic {
+	yo := YamlOptions{}
+	if len(opts) > 0 {
+		yo = opts[0]
+	}
 	j := jsonic.Make(jsonic.Options{
 		String: &jsonic.StringOptions{
 			Chars: "`", // Remove single quote from string chars; we handle YAML strings in yamlMatcher
@@ -117,7 +141,8 @@ func MakeJsonic(opts ...YamlOptions) *jsonic.Jsonic {
 		},
 	})
 
-	j.Use(Yaml, nil)
+	pluginOpts := map[string]any{"meta": yo.Meta}
+	j.Use(Yaml, pluginOpts)
 	return j
 }
 
@@ -283,13 +308,20 @@ func formatKey(v any) string {
 }
 
 // Yaml is a jsonic plugin that adds YAML parsing support.
-func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
+func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 	// Guard against re-entry during SetOptions's plugin re-application.
 	// Without this, Grammar()/Rule() calls would be duplicated.
 	if j.Decoration("yaml-installed") == true {
 		return nil
 	}
 	j.Decorate("yaml-installed", true)
+
+	wantMeta := false
+	if opts != nil {
+		if v, ok := opts["meta"].(bool); ok {
+			wantMeta = v
+		}
+	}
 
 	TX := j.Token("#TX")
 	NR := j.Token("#NR")
@@ -304,6 +336,14 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 	// Register custom tokens.
 	IN := j.Token("#IN") // Indent token
 	EL := j.Token("#EL") // Element marker (- )
+	QM := j.Token("#QM") // YAML `?` explicit-key marker in flow context
+	DS := j.Token("#DS") // YAML document start marker (---)
+	DE := j.Token("#DE") // YAML document end marker (...)
+	DR := j.Token("#DR") // YAML directive line (%YAML / %TAG)
+	_ = QM
+	_ = DS
+	_ = DE
+	_ = DR
 
 	KEY := []jsonic.Tin{TX, NR, ST, VL}
 
@@ -317,6 +357,10 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 	skipNumberMatch := false
 	// Incremental flow-context cache shared between yamlMatcher and handlePlainScalar.
 	flowState := &flowScanState{}
+	// Stream-rule per-parse accumulators.
+	var streamDocs []any
+	var streamMeta []*DocMeta
+	var streamCurMeta *DocMeta
 
 	cfg := j.Config()
 
@@ -368,7 +412,7 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 		if !srcCleaned {
 			srcCleaned = true
 			cleaned := cleanSource(src, tagHandles)
-			cleaned = preprocessFlowCollections(cleaned)
+			// cleaned = preprocessFlowCollections(cleaned)  // disabled — handled by rules
 			if cleaned != src {
 				lex.Src = cleaned
 				pnt.Len = len(cleaned)
@@ -543,29 +587,6 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 				continue // Re-loop to process what follows the anchor
 			}
 
-			// Directive lines (%YAML, %TAG, etc.): skip to ---
-			if fwd[0] == '%' {
-				pos := 0
-				for pos < len(fwd) {
-					if isDocMarker(fwd, pos) {
-						break
-					}
-					for pos < len(fwd) && fwd[pos] != '\n' && fwd[pos] != '\r' {
-						pos++
-					}
-					if pos < len(fwd) && fwd[pos] == '\r' {
-						pos++
-					}
-					if pos < len(fwd) && fwd[pos] == '\n' {
-						pos++
-					}
-					pnt.RI++
-				}
-				pnt.SI += pos
-				pnt.CI = 0
-				continue
-			}
-
 			// Non-specific tag: ! value
 			if fwd[0] == '!' && len(fwd) > 1 && fwd[1] != '!' {
 				if fwd[1] == ' ' {
@@ -676,38 +697,43 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 				return handleTypeTag(lex, pnt, fwd, tagHandles, &pendingAnchors, anchors, TX, NR, VL, ST)
 			}
 
-			// Explicit key: ? key
+			// Flow-context `?` explicit-key marker: emit #QM. Pair/elem rule
+			// alts handle the marker. Block-context `?` falls through to
+			// the heavyweight handleExplicitKey below.
+			if fwd[0] == '?' && len(fwd) > 1 && (fwd[1] == ' ' || fwd[1] == '\t') {
+				flowState.advance(lex.Src, pnt.SI)
+				if flowState.depth > 0 {
+					tkn := lex.Token("#QM", QM, jsonic.Undefined, "?")
+					pnt.SI++
+					pnt.CI++
+					return tkn
+				}
+			}
+
+			// Explicit key: ? key (block context)
 			if fwd[0] == '?' && (len(fwd) < 2 || fwd[1] == ' ' || fwd[1] == '\t' ||
 				fwd[1] == '\n' || fwd[1] == '\r') {
 				return handleExplicitKey(lex, pnt, fwd, &pendingExplicitCL, &pendingTokens, TX, CL, VL, IN)
 			}
 
-			// Document markers: --- and ...
-			if isDocMarker(fwd, 0) {
-				return handleDocMarker(lex, pnt, fwd, IN, &pendingAnchors, anchors, TX)
+			// Document markers: --- → #DS, ... → #DE.
+			// Only at column 0 (start of line or start of source).
+			if (pnt.SI == 0 || lex.Src[pnt.SI-1] == '\n' || lex.Src[pnt.SI-1] == '\r') &&
+				isDocMarker(fwd, 0) {
+				return handleDocMarker(lex, pnt, fwd, DS, DE)
 			}
 
-			// Re-check patterns after --- fall-through.
-			if fwd[0] == '%' {
+			// Directive line at column 0: emit #DR token. The stream rule
+			// applies %TAG handles via the @apply-directive action.
+			if fwd[0] == '%' && (pnt.SI == 0 || lex.Src[pnt.SI-1] == '\n' || lex.Src[pnt.SI-1] == '\r') {
 				pos := 0
-				for pos < len(fwd) {
-					if isDocMarker(fwd, pos) {
-						break
-					}
-					for pos < len(fwd) && fwd[pos] != '\n' && fwd[pos] != '\r' {
-						pos++
-					}
-					if pos < len(fwd) && fwd[pos] == '\r' {
-						pos++
-					}
-					if pos < len(fwd) && fwd[pos] == '\n' {
-						pos++
-					}
-					pnt.RI++
+				for pos < len(fwd) && fwd[pos] != '\n' && fwd[pos] != '\r' {
+					pos++
 				}
+				directiveSrc := fwd[:pos]
 				pnt.SI += pos
-				pnt.CI = 0
-				continue
+				pnt.CI += pos
+				return lex.Token("#DR", DR, directiveSrc, directiveSrc)
 			}
 
 			// Non-specific tag after ---.
@@ -763,10 +789,36 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 			isFlowColon := false
 			if fwd[0] == ':' && len(fwd) > 1 && fwd[1] != ' ' && fwd[1] != '\t' &&
 				fwd[1] != '\n' && fwd[1] != '\r' {
+				// Walk back skipping whitespace and any line-comment regions
+				// (so e.g. `"foo" # c\n  :bar` recognizes the closing quote).
 				prevI := pnt.SI - 1
-				for prevI >= 0 && (lex.Src[prevI] == ' ' || lex.Src[prevI] == '\t' ||
-					lex.Src[prevI] == '\n' || lex.Src[prevI] == '\r') {
-					prevI--
+				for prevI >= 0 {
+					pc := lex.Src[prevI]
+					if pc == ' ' || pc == '\t' || pc == '\n' || pc == '\r' {
+						prevI--
+						continue
+					}
+					// If on a line whose `#` is preceded by whitespace, that's
+					// a comment — jump past it and keep walking back.
+					lineStart := prevI
+					for lineStart > 0 && lex.Src[lineStart-1] != '\n' &&
+						lex.Src[lineStart-1] != '\r' {
+						lineStart--
+					}
+					hashAt := -1
+					for li := lineStart; li <= prevI; li++ {
+						if lex.Src[li] == '#' &&
+							(li == lineStart || lex.Src[li-1] == ' ' ||
+								lex.Src[li-1] == '\t') {
+							hashAt = li
+							break
+						}
+					}
+					if hashAt >= 0 {
+						prevI = hashAt - 1
+						continue
+					}
+					break
 				}
 				if prevI >= 0 && (lex.Src[prevI] == '"' || lex.Src[prevI] == '\'') {
 					isFlowColon = true
@@ -887,6 +939,26 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 					return tkn
 				}
 
+				// Skip #IN when next line is a doc-frame marker (--- / ...)
+				// or directive (%) — let the next call emit #DS / #DE / #DR.
+				if spaces == 0 && (isDocMarker(fwd, pos) || fwd[pos] == '%') {
+					pnt.SI += pos
+					pnt.RI += rows
+					pnt.CI = 1
+					continue
+				}
+
+				// Skip #IN when next content is a flow indicator or quoted
+				// string at column 0 — there's no block to indent into.
+				if spaces == 0 &&
+					(fwd[pos] == '{' || fwd[pos] == '[' ||
+						fwd[pos] == '"' || fwd[pos] == '\'') {
+					pnt.SI += pos
+					pnt.RI += rows
+					pnt.CI = 1
+					continue
+				}
+
 				// Emit #IN with indent level.
 				tkn := lex.Token("#IN", IN, spaces, fwd[:pos])
 				pnt.SI += pos
@@ -902,12 +974,17 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 	}
 
 	// Register the YAML matcher via SetOptions (must come before cfg mutations
-	// below, as SetOptions rebuilds parts of the config).
-	j.SetOptions(jsonic.Options{Lex: &jsonic.LexOptions{Match: map[string]*jsonic.MatchSpec{
-		"yaml": {Order: 500000, Make: func(_ *jsonic.LexConfig, _ *jsonic.Options) jsonic.LexMatcher {
-			return yamlMatcher
+	// below, as SetOptions rebuilds parts of the config). Also configure
+	// `stream` as the start rule (replaces `val`) so the stream rule below
+	// consumes #DS / #DE / #DR doc-frame tokens.
+	j.SetOptions(jsonic.Options{
+		Lex: &jsonic.LexOptions{Match: map[string]*jsonic.MatchSpec{
+			"yaml": {Order: 500000, Make: func(_ *jsonic.LexConfig, _ *jsonic.Options) jsonic.LexMatcher {
+				return yamlMatcher
+			}},
 		}},
-	}}})
+		Rule: &jsonic.RuleOptions{Start: "stream"},
+	})
 
 	// Remove colon as a fixed token — YAML uses ": " (colon-space).
 	delete(cfg.FixedTokens, ":")
@@ -934,6 +1011,209 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 	// ===== Grammar rules =====
 	configureGrammarRules(j, IN, EL, KEY, CL, ZZ, CA, CS, CB, TX, ST, VL, NR,
 		anchors, &pendingAnchors)
+
+	// ===== Stream rule: top-level YAML document collector =====
+	// Replaces `val` as the parser's start rule. Consumes #DS / #DE / #DR
+	// tokens emitted by yamlMatcher, pushes a fresh val for each document's
+	// content, and accumulates results. Final shape:
+	//   - 0 docs (empty source) → nil
+	//   - 1 doc                  → the single value
+	//   - >1 docs                → []any
+	// When wantMeta is true, the final result is wrapped as *MetaResult.
+	ensureCurMeta := func() {
+		if streamCurMeta == nil {
+			streamCurMeta = &DocMeta{Directives: []string{}}
+		}
+	}
+	flushCurMeta := func(ended bool) {
+		ensureCurMeta()
+		if ended {
+			streamCurMeta.Ended = true
+		}
+		streamMeta = append(streamMeta, streamCurMeta)
+		streamCurMeta = nil
+	}
+	pushChildDoc := func(r *jsonic.Rule) {
+		if r.Child != nil && r.Child != jsonic.NoRule && !jsonic.IsUndefined(r.Child.Node) {
+			streamDocs = append(streamDocs, r.Child.Node)
+		} else {
+			streamDocs = append(streamDocs, nil)
+		}
+	}
+	accumChildDoc := func(r *jsonic.Rule, _ *jsonic.Context) {
+		pushChildDoc(r)
+		// The matched close-phase token tells us if this doc ended with `...`.
+		ended := r.C0 != nil && r.C0.Tin == DE
+		flushCurMeta(ended)
+	}
+	finalizeStream := func(r *jsonic.Rule, ctx *jsonic.Context) {
+		if r.Child != nil && r.Child != jsonic.NoRule && !jsonic.IsUndefined(r.Child.Node) {
+			streamDocs = append(streamDocs, r.Child.Node)
+			flushCurMeta(false)
+		}
+		var content any
+		switch len(streamDocs) {
+		case 0:
+			content = nil
+		case 1:
+			content = streamDocs[0]
+		default:
+			content = append([]any(nil), streamDocs...)
+		}
+		var result any = content
+		if wantMeta {
+			var meta any
+			switch len(streamMeta) {
+			case 0:
+				meta = nil
+			case 1:
+				meta = streamMeta[0]
+			default:
+				meta = append([]*DocMeta(nil), streamMeta...)
+			}
+			result = &MetaResult{Meta: meta, Content: content}
+		}
+		r.Node = result
+		// Rotation via `r: stream` creates a chain; ctx.Root is the
+		// original stream the parser hands back.
+		if ctx.Root != nil {
+			ctx.Root.Node = result
+		}
+		// Reset for any subsequent parse on the same plugin instance.
+		streamDocs = nil
+		streamMeta = nil
+		streamCurMeta = nil
+	}
+	applyDirective := func(r *jsonic.Rule, _ *jsonic.Context) {
+		src := r.O0.Src
+		if src == "" {
+			if s, ok := r.O0.Val.(string); ok {
+				src = s
+			}
+		}
+		if m := yamlTagDirectiveRe.FindStringSubmatch(src); m != nil {
+			tagHandles[m[1]] = m[2]
+		}
+		ensureCurMeta()
+		streamCurMeta.Directives = append(streamCurMeta.Directives, src)
+	}
+	markExplicit := func(_ *jsonic.Rule, _ *jsonic.Context) {
+		ensureCurMeta()
+		streamCurMeta.Explicit = true
+	}
+	pushEmptyDoc := func(_ *jsonic.Rule, _ *jsonic.Context) {
+		streamDocs = append(streamDocs, nil)
+		flushCurMeta(true)
+	}
+
+	j.Rule("stream", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
+		rs.AddOpen(
+			// Consume directive line; rotate to stream to look for the next token.
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DR}}, A: applyDirective, R: "stream", G: "yaml"},
+			// Explicit doc start: push val for the document content.
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DS}}, A: markExplicit, P: "val", G: "yaml"},
+			// ... before any content: count as empty doc, look for more.
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DE}}, A: pushEmptyDoc, R: "stream", G: "yaml"},
+			// Empty source: end immediately.
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{ZZ}}, B: 1, G: "yaml"},
+			// Implicit first doc.
+			&jsonic.AltSpec{P: "val", G: "yaml"},
+		)
+		rs.AddClose(
+			// End of input: accumulate last doc, finalize result shape.
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{ZZ}}, A: finalizeStream, G: "yaml"},
+			// Directive between docs.
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DR}},
+				A: func(r *jsonic.Rule, ctx *jsonic.Context) {
+					accumChildDoc(r, ctx)
+					applyDirective(r, ctx)
+				},
+				R: "stream", G: "yaml"},
+			// ... terminator: accumulate, look for next doc.
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DE}}, A: accumChildDoc, R: "stream", G: "yaml"},
+			// --- start of next doc (back up so stream.open consumes it).
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DS}}, B: 1, A: accumChildDoc, R: "stream", G: "yaml"},
+		)
+	})
+
+	// Make every block/flow rule yield to the stream rule when it sees a
+	// doc-frame marker. Rules back up the marker so the stream rule can
+	// accumulate the doc and process the next one. PrependClose because
+	// jsonic's stock pair has a catch-all `{R: "pair", B: 1}` (no S) that
+	// always matches; appended alts would never fire.
+	docFrameBackup := func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
+		rs.PrependClose(
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DS}}, B: 1, G: "yaml"},
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DE}}, B: 1, G: "yaml"},
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DR}}, B: 1, G: "yaml"},
+		)
+	}
+	for _, name := range []string{"map", "list", "pair", "elem",
+		"yamlBlockList", "yamlBlockElem", "yamlElemMap", "yamlElemPair"} {
+		j.Rule(name, docFrameBackup)
+	}
+
+	// val.open also needs back-up alts for empty docs between markers.
+	j.Rule("val", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
+		setNullAction := func(r *jsonic.Rule, _ *jsonic.Context) { r.Node = nil }
+		rs.PrependOpen(
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DS}}, B: 1, A: setNullAction, G: "yaml"},
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DE}}, B: 1, A: setNullAction, G: "yaml"},
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DR}}, B: 1, A: setNullAction, G: "yaml"},
+		)
+		rs.PrependClose(
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DS}}, B: 1, G: "yaml"},
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DE}}, B: 1, G: "yaml"},
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DR}}, B: 1, G: "yaml"},
+		)
+	})
+
+	// Implicit-null pair alts: KEY directly followed by CA (next pair) or CB
+	// (end of map) means a key with null value. Mirrors TS pair rule
+	// `[#KEY #CA]` / `[#KEY #CB]` alts. PrependOpen so they run before the
+	// stock `[#KEY #CL]` and the catch-all `{R: pair, B: 1}`.
+	implicitNullPair := func(r *jsonic.Rule, _ *jsonic.Context) {
+		key := extractKey(r.O0, anchors)
+		r.U["key"] = key
+		if m, ok := r.Node.(map[string]any); ok {
+			m[formatKey(key)] = nil
+		}
+	}
+	// QM-prefixed pair: {? k : v} (flow map explicit-key marker). Key is
+	// at r.O1 because r.O0 is the #QM token.
+	qmPairKey := func(r *jsonic.Rule, _ *jsonic.Context) {
+		r.U["key"] = extractKey(r.O1, anchors)
+	}
+	qmImplicitNullPair := func(r *jsonic.Rule, _ *jsonic.Context) {
+		key := extractKey(r.O1, anchors)
+		r.U["key"] = key
+		if m, ok := r.Node.(map[string]any); ok {
+			m[formatKey(key)] = nil
+		}
+	}
+	j.Rule("pair", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
+		rs.PrependOpen(
+			&jsonic.AltSpec{S: [][]jsonic.Tin{KEY, {CA}}, A: implicitNullPair, B: 1, G: "yaml"},
+			&jsonic.AltSpec{S: [][]jsonic.Tin{KEY, {CB}}, A: implicitNullPair, B: 1, G: "yaml"},
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{QM}, KEY, {CL}}, P: "val",
+				U: map[string]any{"pair": true}, A: qmPairKey, G: "yaml"},
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{QM}, KEY, {CA}}, A: qmImplicitNullPair, B: 1, G: "yaml"},
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{QM}, KEY, {CB}}, A: qmImplicitNullPair, B: 1, G: "yaml"},
+		)
+	})
+
+	// QM-prefixed elem: [? k : v] (flow seq explicit-key marker → wrap as map).
+	// Eat the leading #QM, then back up KEY+CL so yamlElemMap consumes them.
+	setMapInAction := func(r *jsonic.Rule, _ *jsonic.Context) {
+		r.K["yamlMapIn"] = r.N["in"] + 2
+	}
+	j.Rule("elem", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
+		rs.PrependOpen(
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{QM}, KEY, {CL}}, P: "yamlElemMap",
+				B: 2, A: setMapInAction, G: "yaml"},
+		)
+	})
+
 	return nil
 }
 
@@ -942,432 +1222,13 @@ func Yaml(j *jsonic.Jsonic, _ map[string]any) error {
 func isWordByte(b byte) bool {
 	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
 }
-
-// needsFlowPreprocess scans src once and returns true only if some `{` or
-// `[` lies at a YAML value position. Fast-path bypass for pure block-style
-// YAML.
-func needsFlowPreprocess(src string) bool {
-	for i := 0; i < len(src); i++ {
-		c := src[i]
-		if c == '"' {
-			i++
-			for i < len(src) && src[i] != '"' {
-				if src[i] == '\\' && i+1 < len(src) {
-					i++
-				}
-				i++
-			}
-			continue
-		}
-		if c == '\'' {
-			pc := byte(0)
-			if i > 0 {
-				pc = src[i-1]
-			}
-			if !isWordByte(pc) {
-				i++
-				for i < len(src) {
-					if src[i] == '\'' && i+1 < len(src) && src[i+1] == '\'' {
-						i++
-						i++
-						continue
-					}
-					if src[i] == '\'' {
-						break
-					}
-					i++
-				}
-				continue
-			}
-		}
-		if c == '{' || c == '[' {
-			if isFlowCollectionStart(src, i) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// preprocessFlowCollections rewrites YAML flow collections so that jsonic's
-// core grammar can consume them. Mirrors src/yaml.ts:214-258.
-func preprocessFlowCollections(src string) string {
-	if !needsFlowPreprocess(src) {
-		return src
-	}
-	var out strings.Builder
-	out.Grow(len(src))
-	i := 0
-	for i < len(src) {
-		c := src[i]
-
-		if c == '"' {
-			out.WriteByte(c)
-			i++
-			for i < len(src) && src[i] != '"' {
-				if src[i] == '\\' {
-					out.WriteByte(src[i])
-					i++
-					if i >= len(src) {
-						break
-					}
-				}
-				out.WriteByte(src[i])
-				i++
-			}
-			if i < len(src) {
-				out.WriteByte(src[i])
-				i++
-			}
-			continue
-		}
-
-		if c == '\'' {
-			pc := byte(0)
-			if i > 0 {
-				pc = src[i-1]
-			}
-			if !isWordByte(pc) {
-				out.WriteByte(c)
-				i++
-				for i < len(src) {
-					if src[i] == '\'' && i+1 < len(src) && src[i+1] == '\'' {
-						out.WriteString("''")
-						i += 2
-						continue
-					}
-					if src[i] == '\'' {
-						break
-					}
-					out.WriteByte(src[i])
-					i++
-				}
-				if i < len(src) {
-					out.WriteByte(src[i])
-					i++
-				}
-				continue
-			}
-		}
-
-		if (c == '{' || c == '[') && isFlowCollectionStart(src, i) {
-			text, end := processFlowCollection(src, i)
-			out.WriteString(text)
-			i = end
-			continue
-		}
-
-		out.WriteByte(c)
-		i++
-	}
-	return out.String()
-}
-
-// isFlowCollectionStart reports whether the '{' or '[' byte at src[i]
-// opens a real flow collection. Mirrors src/yaml.ts:262-291.
-func isFlowCollectionStart(src string, i int) bool {
-	if i == 0 {
-		return true
-	}
-	j := i - 1
-	for j >= 0 && (src[j] == ' ' || src[j] == '\t') {
-		j--
-	}
-	if j < 0 {
-		return true
-	}
-	prev := src[j]
-	if prev == '\n' || prev == '\r' {
-		return true
-	}
-	if prev == ':' {
-		return true
-	}
-	if prev == '-' {
-		if j > 0 {
-			pc := src[j-1]
-			if isWordByte(pc) || pc == '_' {
-				return false
-			}
-		}
-		return true
-	}
-	return false
-}
-
-// processFlowCollection rewrites a flow collection starting at src[start].
-// Mirrors src/yaml.ts:293-508.
-func processFlowCollection(src string, start int) (string, int) {
-	open := src[start]
-	close := byte('}')
-	if open == '[' {
-		close = ']'
-	}
-	isMap := open == '{'
-
-	var out strings.Builder
-	out.Grow(64)
-	out.WriteByte(open)
-
-	var entryBuf strings.Builder
-	entryHasColon := false
-
-	pushEntryByte := func(b byte) {
-		if isMap {
-			entryBuf.WriteByte(b)
-		} else {
-			out.WriteByte(b)
-		}
-	}
-	pushEntryString := func(s string) {
-		if isMap {
-			entryBuf.WriteString(s)
-		} else {
-			out.WriteString(s)
-		}
-	}
-
-	i := start + 1
-	for i < len(src) {
-		ch := src[i]
-
-		if ch == '{' || ch == '[' {
-			nestedText, nestedEnd := processFlowCollection(src, i)
-			pushEntryString(nestedText)
-			if isMap {
-				entryHasColon = true
-			}
-			i = nestedEnd
-			continue
-		}
-
-		if ch == '"' {
-			var s strings.Builder
-			s.WriteByte('"')
-			i++
-			for i < len(src) && src[i] != '"' {
-				if src[i] == '\\' {
-					s.WriteByte(src[i])
-					i++
-					if i >= len(src) {
-						break
-					}
-					s.WriteByte(src[i])
-					i++
-					continue
-				}
-				if src[i] == '\n' || src[i] == '\r' {
-					if src[i] == '\r' && i+1 < len(src) && src[i+1] == '\n' {
-						i++
-					}
-					s.WriteByte(' ')
-					i++
-					for i < len(src) && (src[i] == ' ' || src[i] == '\t') {
-						i++
-					}
-					continue
-				}
-				s.WriteByte(src[i])
-				i++
-			}
-			if i < len(src) {
-				s.WriteByte('"')
-				i++
-			}
-			pushEntryString(s.String())
-			continue
-		}
-
-		if ch == '\'' {
-			pc := byte(0)
-			if i > 0 {
-				pc = src[i-1]
-			}
-			if isWordByte(pc) {
-				pushEntryByte(ch)
-				i++
-				continue
-			}
-			var s strings.Builder
-			s.WriteByte('\'')
-			i++
-			for i < len(src) {
-				if src[i] == '\'' && i+1 < len(src) && src[i+1] == '\'' {
-					s.WriteString("''")
-					i += 2
-					continue
-				}
-				if src[i] == '\'' {
-					break
-				}
-				if src[i] == '\n' || src[i] == '\r' {
-					if src[i] == '\r' && i+1 < len(src) && src[i+1] == '\n' {
-						i++
-					}
-					s.WriteByte(' ')
-					i++
-					for i < len(src) && (src[i] == ' ' || src[i] == '\t') {
-						i++
-					}
-					continue
-				}
-				s.WriteByte(src[i])
-				i++
-			}
-			if i < len(src) {
-				s.WriteByte('\'')
-				i++
-			}
-			pushEntryString(s.String())
-			continue
-		}
-
-		if ch == '#' {
-			if i > 0 {
-				pp := src[i-1]
-				if pp == ' ' || pp == '\t' || pp == '\n' || pp == '\r' {
-					for i < len(src) && src[i] != '\n' && src[i] != '\r' {
-						i++
-					}
-					pushEntryByte(' ')
-					continue
-				}
-			}
-		}
-
-		if ch == '\n' || ch == '\r' {
-			if ch == '\r' && i+1 < len(src) && src[i+1] == '\n' {
-				i++
-			}
-			i++
-			for i < len(src) && (src[i] == ' ' || src[i] == '\t') {
-				i++
-			}
-			pushEntryByte(' ')
-			continue
-		}
-
-		if isMap && ch == ':' {
-			next := byte(0)
-			if i+1 < len(src) {
-				next = src[i+1]
-			}
-			if next == ' ' || next == '\t' || next == ',' || next == '}' || next == ']' ||
-				next == '\n' || next == '\r' || next == 0 {
-				entryHasColon = true
-				entryBuf.WriteByte(':')
-				i++
-				continue
-			}
-			if i > start+1 {
-				acc := strings.TrimRight(entryBuf.String(), " \t")
-				if strings.HasSuffix(acc, "\"") || strings.HasSuffix(acc, "'") {
-					entryHasColon = true
-				}
-			}
-			entryBuf.WriteByte(':')
-			i++
-			continue
-		}
-
-		if ch == ',' {
-			if isMap {
-				entry := strings.TrimSpace(entryBuf.String())
-				if !entryHasColon && len(entry) > 0 {
-					out.WriteString(entry)
-					out.WriteString(": ~,")
-				} else {
-					out.WriteString(entry)
-					out.WriteByte(',')
-				}
-				entryBuf.Reset()
-				entryHasColon = false
-			} else {
-				out.WriteByte(',')
-			}
-			i++
-			continue
-		}
-
-		if ch == close {
-			if isMap {
-				entry := strings.TrimSpace(entryBuf.String())
-				if !entryHasColon && len(entry) > 0 {
-					out.WriteString(entry)
-					out.WriteString(": ~")
-				} else {
-					out.WriteString(entry)
-				}
-			}
-			out.WriteByte(close)
-			i++
-			return out.String(), i
-		}
-
-		if ch == '?' && i+1 < len(src) && (src[i+1] == ' ' || src[i+1] == '\t') {
-			isEntryStart := false
-			if !isMap {
-				prevContent := strings.TrimRight(out.String(), " \t")
-				if len(prevContent) > 0 {
-					last := prevContent[len(prevContent)-1]
-					isEntryStart = last == '[' || last == ','
-				}
-			} else {
-				isEntryStart = strings.TrimSpace(entryBuf.String()) == ""
-			}
-			if isEntryStart && !isMap {
-				out.WriteByte('{')
-				var inner strings.Builder
-				i += 2
-				for i < len(src) && src[i] != ',' && src[i] != close {
-					if src[i] == '\n' || src[i] == '\r' {
-						if src[i] == '\r' && i+1 < len(src) && src[i+1] == '\n' {
-							i++
-						}
-						inner.WriteByte(' ')
-						i++
-						for i < len(src) && (src[i] == ' ' || src[i] == '\t') {
-							i++
-						}
-						continue
-					}
-					if src[i] == '#' {
-						for i < len(src) && src[i] != '\n' && src[i] != '\r' {
-							i++
-						}
-						continue
-					}
-					inner.WriteByte(src[i])
-					i++
-				}
-				out.WriteString(strings.TrimSpace(inner.String()))
-				out.WriteByte('}')
-				continue
-			}
-			if isEntryStart && isMap {
-				i += 2
-				continue
-			}
-		}
-
-		pushEntryByte(ch)
-		i++
-	}
-
-	if isMap {
-		out.WriteString(entryBuf.String())
-	}
-	out.WriteByte(close)
-	return out.String(), i
-}
-
-// cleanSource strips YAML directives and initial document markers from source.
+// document markers from source — those flow through as #DR / #DS / #DE
+// tokens consumed by the `stream` rule.
 func cleanSource(src string, tagHandles map[string]string) string {
 	if len(src) == 0 {
 		return src
 	}
-
-	// Remove leading directive block.
+	// Capture %TAG handles from leading directive block (before first ---).
 	if src[0] == '%' {
 		dIdx := strings.Index(src, "\n---")
 		if dIdx >= 0 {
@@ -1378,53 +1239,8 @@ func cleanSource(src string, tagHandles map[string]string) string {
 					tagHandles[tagMatch[1]] = tagMatch[2]
 				}
 			}
-			src = src[dIdx+1:]
 		}
 	}
-
-	// Strip leading comment lines before ---.
-	for {
-		if !leadingCommentRe.MatchString(src) || !strings.Contains(src, "\n---") {
-			break
-		}
-		src = leadingCommentRe.ReplaceAllString(src, "")
-	}
-
-	// Handle document start marker (---).
-	docMatch := docStartRe.FindStringSubmatch(src)
-	if docMatch != nil {
-		prefix := ""
-		if len(docMatch) > 2 {
-			prefix = docMatch[2]
-		}
-		rest := src[len(docMatch[0]):]
-		trimmed := strings.TrimLeft(prefix, " \t")
-
-		if len(trimmed) > 0 && (trimmed[0] == '>' || trimmed[0] == '|') {
-			// Leave --- in place for block scalar context.
-		} else if prefix != "" && (len(trimmed) == 0 || trimmed[0] != '#') {
-			if structTagFullLineRe.MatchString(trimmed) {
-				src = rest
-			} else {
-				suffix := ""
-				if len(docMatch) > 3 {
-					suffix = docMatch[3]
-				}
-				src = prefix + suffix + rest
-			}
-		} else {
-			src = rest
-		}
-	}
-
-	// Handle document end marker (... at end of source).
-	if docEndRe.MatchString(src) {
-		loc := docEndRe.FindStringIndex(src)
-		if loc != nil {
-			src = src[:loc[0]]
-		}
-	}
-
 	return src
 }
 
@@ -2300,80 +2116,47 @@ func handleExplicitKey(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 }
 
 // handleDocMarker processes --- and ... document markers.
+// handleDocMarker emits a #DS for `---` or #DE for `...`, consuming the
+// rest of the marker line (including any trailing comment + newline) so the
+// next matcher call lands on the next document's content with no spurious
+// #IN. Inline content on the same line as the marker (--- foo) is left
+// for subsequent matcher calls.
 func handleDocMarker(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
-	IN jsonic.Tin, pendingAnchors *[]anchorInfo, anchors map[string]any,
-	TX jsonic.Tin) *jsonic.Token {
+	DS, DE jsonic.Tin) *jsonic.Token {
 
+	isEnd := fwd[0] == '.'
 	pos := 3
-	for pos < len(fwd) && fwd[pos] != '\n' && fwd[pos] != '\r' {
+	// Skip trailing whitespace after marker.
+	for pos < len(fwd) && (fwd[pos] == ' ' || fwd[pos] == '\t') {
 		pos++
 	}
+	hasInline := pos < len(fwd) &&
+		fwd[pos] != '\n' && fwd[pos] != '\r' && fwd[pos] != '#'
 
-	if fwd[0] == '.' {
-		// ... terminates document.
-		pnt.SI += pos
-		pnt.CI += pos
-		for pnt.SI < pnt.Len && (lex.Src[pnt.SI] == '\n' || lex.Src[pnt.SI] == '\r') {
-			if lex.Src[pnt.SI] == '\r' {
-				pnt.SI++
-			}
-			if pnt.SI < pnt.Len && lex.Src[pnt.SI] == '\n' {
-				pnt.SI++
-			}
+	if !hasInline {
+		// Skip trailing comment, then consume the line terminator.
+		for pos < len(fwd) && fwd[pos] != '\n' && fwd[pos] != '\r' {
+			pos++
+		}
+		if pos < len(fwd) && fwd[pos] == '\r' {
+			pos++
+		}
+		if pos < len(fwd) && fwd[pos] == '\n' {
+			pos++
 			pnt.RI++
 		}
-		return lex.Token("#ZZ", jsonic.TinZZ, jsonic.Undefined, "")
+		pnt.CI = 1 // column 1 at start of next line
+	} else {
+		pnt.CI += pos
 	}
-
-	// --- handler.
-	afterDash := 3
-	for afterDash < len(fwd) && fwd[afterDash] == ' ' {
-		afterDash++
+	var tkn *jsonic.Token
+	if isEnd {
+		tkn = lex.Token("#DE", DE, jsonic.Undefined, "...")
+	} else {
+		tkn = lex.Token("#DS", DS, jsonic.Undefined, "---")
 	}
-	dashNextCh := byte(0)
-	if afterDash < len(fwd) {
-		dashNextCh = fwd[afterDash]
-	}
-	hasInlineValue := dashNextCh != 0 && dashNextCh != '\n' && dashNextCh != '\r' &&
-		dashNextCh != '&' && dashNextCh != '!' && dashNextCh != '#'
-
-	if hasInlineValue {
-		pnt.SI += afterDash
-		pnt.CI = afterDash
-		return nil // Fall through to continue matching.
-	}
-
-	// Plain --- with nothing after it.
 	pnt.SI += pos
-	pnt.RI++
-	if pnt.SI < pnt.Len && lex.Src[pnt.SI] == '\r' {
-		pnt.SI++
-	}
-	if pnt.SI < pnt.Len && lex.Src[pnt.SI] == '\n' {
-		pnt.SI++
-	}
-	spaces := 0
-	for pnt.SI+spaces < pnt.Len && lex.Src[pnt.SI+spaces] == ' ' {
-		spaces++
-	}
-	pnt.SI += spaces
-	pnt.CI = spaces
-
-	if pnt.SI >= pnt.Len {
-		return lex.Token("#ZZ", jsonic.TinZZ, jsonic.Undefined, "")
-	}
-
-	nextCh := lex.Src[pnt.SI]
-	if nextCh == '{' || nextCh == '[' || nextCh == '"' || nextCh == '\'' {
-		return nil // Fall through.
-	}
-	if spaces == 0 && nextCh != '-' && nextCh != '.' && nextCh != '?' &&
-		nextCh != '\n' && nextCh != '\r' {
-		return nil // Fall through.
-	}
-
-	// Emit #IN with indent level.
-	return lex.Token("#IN", IN, spaces, fwd[:pos+1+spaces])
+	return tkn
 }
 
 // handleDoubleQuotedString processes YAML double-quoted strings.
@@ -2550,7 +2333,11 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 				val += " "
 			}
 		} else {
-			val += string(fwd[i])
+			// Append the source byte as-is so multi-byte UTF-8 sequences
+			// survive intact. `string(byte)` would treat the byte value as
+			// a Unicode codepoint and re-encode it as UTF-8, mangling any
+			// non-ASCII byte that is part of a multi-byte sequence.
+			val += fwd[i : i+1]
 			i++
 		}
 	}
@@ -2609,7 +2396,11 @@ func handleSingleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 				val += " "
 			}
 		} else {
-			val += string(fwd[i])
+			// Append the source byte as-is so multi-byte UTF-8 sequences
+			// survive intact. `string(byte)` would treat the byte value as
+			// a Unicode codepoint and re-encode it as UTF-8, mangling any
+			// non-ASCII byte that is part of a multi-byte sequence.
+			val += fwd[i : i+1]
 			i++
 		}
 	}
