@@ -58,5 +58,11 @@ update_skip.js
 # Unrelated local directories
 csv/
 
+# Benchmark artifacts (run `node bench/fixtures/generate.mjs` to recreate).
+bench/fixtures/*.yaml
+bench/**/*.cpuprofile
+bench/**/*.cpuprof
+bench/**/*.memprof
+bench/**/*.json
 # Claude Code per-machine settings
 .claude*/settings.local.json
