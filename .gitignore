@@ -57,3 +57,6 @@ update_skip.js
 
 # Unrelated local directories
 csv/
+
+# Claude Code per-machine settings
+.claude*/settings.local.json
