@@ -1190,84 +1190,6 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 		)
 	})
 
-	// Make every block/flow rule yield to the stream rule when it sees a
-	// doc-frame marker. Rules back up the marker so the stream rule can
-	// accumulate the doc and process the next one. PrependClose because
-	// jsonic's stock pair has a catch-all `{R: "pair", B: 1}` (no S) that
-	// always matches; appended alts would never fire.
-	docFrameBackup := func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
-		rs.PrependClose(
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DS}}, B: 1, G: "yaml"},
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DE}}, B: 1, G: "yaml"},
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DR}}, B: 1, G: "yaml"},
-		)
-	}
-	for _, name := range []string{"map", "list", "pair", "elem",
-		"yamlBlockList", "yamlBlockElem", "yamlElemMap", "yamlElemPair"} {
-		j.Rule(name, docFrameBackup)
-	}
-
-	// val.open also needs back-up alts for empty docs between markers.
-	j.Rule("val", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
-		setNullAction := func(r *jsonic.Rule, _ *jsonic.Context) { r.Node = nil }
-		rs.PrependOpen(
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DS}}, B: 1, A: setNullAction, G: "yaml"},
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DE}}, B: 1, A: setNullAction, G: "yaml"},
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DR}}, B: 1, A: setNullAction, G: "yaml"},
-		)
-		rs.PrependClose(
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DS}}, B: 1, G: "yaml"},
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DE}}, B: 1, G: "yaml"},
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DR}}, B: 1, G: "yaml"},
-		)
-	})
-
-	// Implicit-null pair alts: KEY directly followed by CA (next pair) or CB
-	// (end of map) means a key with null value. Mirrors TS pair rule
-	// `[#KEY #CA]` / `[#KEY #CB]` alts. PrependOpen so they run before the
-	// stock `[#KEY #CL]` and the catch-all `{R: pair, B: 1}`.
-	implicitNullPair := func(r *jsonic.Rule, _ *jsonic.Context) {
-		key := extractKey(r.O0, anchors)
-		r.U["key"] = key
-		if m, ok := r.Node.(map[string]any); ok {
-			m[formatKey(key)] = nil
-		}
-	}
-	// QM-prefixed pair: {? k : v} (flow map explicit-key marker). Key is
-	// at r.O1 because r.O0 is the #QM token.
-	qmPairKey := func(r *jsonic.Rule, _ *jsonic.Context) {
-		r.U["key"] = extractKey(r.O1, anchors)
-	}
-	qmImplicitNullPair := func(r *jsonic.Rule, _ *jsonic.Context) {
-		key := extractKey(r.O1, anchors)
-		r.U["key"] = key
-		if m, ok := r.Node.(map[string]any); ok {
-			m[formatKey(key)] = nil
-		}
-	}
-	j.Rule("pair", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
-		rs.PrependOpen(
-			&jsonic.AltSpec{S: [][]jsonic.Tin{KEY, {CA}}, A: implicitNullPair, B: 1, G: "yaml"},
-			&jsonic.AltSpec{S: [][]jsonic.Tin{KEY, {CB}}, A: implicitNullPair, B: 1, G: "yaml"},
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{QM}, KEY, {CL}}, P: "val",
-				U: map[string]any{"pair": true}, A: qmPairKey, G: "yaml"},
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{QM}, KEY, {CA}}, A: qmImplicitNullPair, B: 1, G: "yaml"},
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{QM}, KEY, {CB}}, A: qmImplicitNullPair, B: 1, G: "yaml"},
-		)
-	})
-
-	// QM-prefixed elem: [? k : v] (flow seq explicit-key marker → wrap as map).
-	// Eat the leading #QM, then back up KEY+CL so yamlElemMap consumes them.
-	setMapInAction := func(r *jsonic.Rule, _ *jsonic.Context) {
-		r.K["yamlMapIn"] = r.N["in"] + 2
-	}
-	j.Rule("elem", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
-		rs.PrependOpen(
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{QM}, KEY, {CL}}, P: "yamlElemMap",
-				B: 2, A: setMapInAction, G: "yaml"},
-		)
-	})
-
 	return nil
 }
 
@@ -2604,6 +2526,11 @@ const grammarText = `
   # Amend val rule: YAML indent/element-marker handling.
   rule: val: open: {
     alts: [
+      # Doc-frame markers between docs mean an empty value here; back up so
+      # the stream rule consumes the marker and starts the next document.
+      { s: '#DS' b: 1 a: '@val-set-null' g: yaml }
+      { s: '#DE' b: 1 a: '@val-set-null' g: yaml }
+      { s: '#DR' b: 1 a: '@val-set-null' g: yaml }
       # Indent followed by content: push indent rule.
       { s: '#IN' c: '@val-indent-deeper' p: indent a: '@val-set-in-from-o0' g: yaml }
       # Same indent followed by element marker: list value at map level.
@@ -2619,6 +2546,10 @@ const grammarText = `
   }
   rule: val: close: {
     alts: [
+      # Doc-frame markers terminate val; back up for the stream rule.
+      { s: '#DS' b: 1 g: yaml }
+      { s: '#DE' b: 1 g: yaml }
+      { s: '#DR' b: 1 g: yaml }
       { s: '#IN' b: 1 g: yaml }
     ]
     inject: { append: false }
@@ -2642,6 +2573,10 @@ const grammarText = `
     { p: val g: yaml }
   ]
   rule: yamlBlockList: close: [
+    # Doc-frame markers terminate list; back up for the stream rule.
+    { s: '#DS' b: 1 g: yaml }
+    { s: '#DE' b: 1 g: yaml }
+    { s: '#DR' b: 1 g: yaml }
     # Indent followed by element marker: next element at same level.
     { s: ['#IN' '#EL'] c: '@t0-eq-in' r: yamlBlockElem g: yaml }
     # Same or lesser indent: close list.
@@ -2657,6 +2592,10 @@ const grammarText = `
     { p: val g: yaml }
   ]
   rule: yamlBlockElem: close: [
+    # Doc-frame markers terminate elem; back up for the stream rule.
+    { s: '#DS' b: 1 g: yaml }
+    { s: '#DE' b: 1 g: yaml }
+    { s: '#DR' b: 1 g: yaml }
     { s: ['#IN' '#EL'] c: '@t0-eq-in' r: yamlBlockElem g: yaml }
     { s: '#IN' c: '@t0-le-in' b: 1 g: yaml }
     { s: '#EL' r: yamlBlockElem g: yaml }
@@ -2666,6 +2605,10 @@ const grammarText = `
   # Amend list rule: close on dedent or same-indent non-element.
   rule: list: close: {
     alts: [
+      # Doc-frame markers terminate list; back up for the stream rule.
+      { s: '#DS' b: 1 g: yaml }
+      { s: '#DE' b: 1 g: yaml }
+      { s: '#DR' b: 1 g: yaml }
       { s: '#IN' c: '@t0-le-in' b: 1 g: yaml }
     ]
     inject: { append: false }
@@ -2680,20 +2623,36 @@ const grammarText = `
   }
   rule: map: close: {
     alts: [
+      # Doc-frame markers terminate map; back up for the stream rule.
+      { s: '#DS' b: 1 g: yaml }
+      { s: '#DE' b: 1 g: yaml }
+      { s: '#DR' b: 1 g: yaml }
       { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
     ]
     inject: { append: false }
   }
 
   # Amend pair rule: end of input ends pair; dedent closes, same-indent repeats.
+  # Also handle YAML flow-mapping shapes Jsonic doesn't have natively:
+  # - implicit null values: {a, b: c}  — KEY followed directly by CA or CB
+  # - explicit-key marker:  {? k : v}  — leading #QM is consumed
   rule: pair: open: {
     alts: [
+      { s: ['#KEY' '#CA'] a: '@implicit-null-pair' b: 1 g: yaml }
+      { s: ['#KEY' '#CB'] a: '@implicit-null-pair' b: 1 g: yaml }
+      { s: ['#QM' '#KEY' '#CL'] p: val u: { pair: true } a: '@qm-pairkey' g: yaml }
+      { s: ['#QM' '#KEY' '#CA'] a: '@qm-implicit-null-pair' b: 1 g: yaml }
+      { s: ['#QM' '#KEY' '#CB'] a: '@qm-implicit-null-pair' b: 1 g: yaml }
       { s: '#ZZ' b: 1 g: yaml }
     ]
     inject: { append: false }
   }
   rule: pair: close: {
     alts: [
+      # Doc-frame markers terminate pair; back up for the stream rule.
+      { s: '#DS' b: 1 g: yaml }
+      { s: '#DE' b: 1 g: yaml }
+      { s: '#DR' b: 1 g: yaml }
       { s: '#IN' c: '@t0-eq-in' r: pair g: yaml }
       { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
     ]
@@ -2705,6 +2664,10 @@ const grammarText = `
     { s: ['#KEY' '#CL'] p: val a: '@elem-key' g: yaml }
   ]
   rule: yamlElemMap: close: [
+    # Doc-frame markers terminate elem-map; back up for the stream rule.
+    { s: '#DS' b: 1 g: yaml }
+    { s: '#DE' b: 1 g: yaml }
+    { s: '#DR' b: 1 g: yaml }
     { s: '#IN' c: '@t0-eq-map-in' r: yamlElemPair g: yaml }
     { s: '#IN' b: 1 g: yaml }
     { s: '#CA' b: 1 g: yaml }
@@ -2718,6 +2681,10 @@ const grammarText = `
     { s: ['#KEY' '#CL'] p: val a: '@elem-key' g: yaml }
   ]
   rule: yamlElemPair: close: [
+    # Doc-frame markers terminate elem-pair; back up for the stream rule.
+    { s: '#DS' b: 1 g: yaml }
+    { s: '#DE' b: 1 g: yaml }
+    { s: '#DR' b: 1 g: yaml }
     { s: '#IN' c: '@t0-eq-map-in' r: yamlElemPair g: yaml }
     { s: '#IN' b: 1 g: yaml }
     { s: '#CA' b: 1 g: yaml }
@@ -2727,14 +2694,22 @@ const grammarText = `
   ]
 
   # Amend elem rule for YAML sequences ("- key: val" at top level of [ ... ]).
+  # Also handle flow-sequence explicit-key entries: [? k : v] is a single-pair
+  # map element. Eat the leading #QM, then back up KEY+CL so yamlElemMap
+  # consumes them as a normal pair.
   rule: elem: open: {
     alts: [
       { s: ['#KEY' '#CL'] p: yamlElemMap b: 2 a: '@set-map-in' g: yaml }
+      { s: ['#QM' '#KEY' '#CL'] p: yamlElemMap b: 2 a: '@set-map-in' g: yaml }
     ]
     inject: { append: false }
   }
   rule: elem: close: {
     alts: [
+      # Doc-frame markers terminate elem; back up for the stream rule.
+      { s: '#DS' b: 1 g: yaml }
+      { s: '#DE' b: 1 g: yaml }
+      { s: '#DR' b: 1 g: yaml }
       { s: ['#IN' '#EL'] c: '@t0-eq-in' r: elem g: yaml }
       { s: '#IN' c: '@t0-eq-in' b: 1 g: yaml }
       { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
@@ -2855,6 +2830,23 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		}),
 		"@elem-key": jsonic.AltAction(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			r.U["key"] = extractKey(r.O0, anchors)
+		}),
+		"@implicit-null-pair": jsonic.AltAction(func(r *jsonic.Rule, _ *jsonic.Context) {
+			key := extractKey(r.O0, anchors)
+			r.U["key"] = key
+			if m, ok := r.Node.(map[string]any); ok {
+				m[formatKey(key)] = nil
+			}
+		}),
+		"@qm-pairkey": jsonic.AltAction(func(r *jsonic.Rule, _ *jsonic.Context) {
+			r.U["key"] = extractKey(r.O1, anchors)
+		}),
+		"@qm-implicit-null-pair": jsonic.AltAction(func(r *jsonic.Rule, _ *jsonic.Context) {
+			key := extractKey(r.O1, anchors)
+			r.U["key"] = key
+			if m, ok := r.Node.(map[string]any); ok {
+				m[formatKey(key)] = nil
+			}
 		}),
 	}
 

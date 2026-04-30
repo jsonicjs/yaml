@@ -542,6 +542,18 @@ c:
       assert.deepEqual(y(`%TAG !! tag:example.com,2025:\n---\na: 1`),
         { a: 1 })
     })
+
+    test('reparse-same-source-is-idempotent', () => {
+      // Regression: parsing the same source twice on one parser instance
+      // must produce identical output. Earlier versions used a source-string
+      // identity check to gate per-parse state reset, which silently skipped
+      // the reset on the second call and accumulated stream state.
+      const j = Jsonic.make().use(Yaml)
+      const src = `openapi: 3.0\npaths:\n  /a:\n    get: {}`
+      const a = j(src)
+      const b = j(src)
+      assert.deepEqual(b, a)
+    })
   })
 
 

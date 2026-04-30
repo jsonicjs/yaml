@@ -41,17 +41,17 @@ const grammarText = `
   # Amend val rule: YAML indent/element-marker handling.
   rule: val: open: {
     alts: [
+      # Doc-frame markers between docs mean an empty value here; back up so
+      # the stream rule consumes the marker and starts the next document.
+      { s: '#DS' b: 1 a: '@val-set-null' g: yaml }
+      { s: '#DE' b: 1 a: '@val-set-null' g: yaml }
+      { s: '#DR' b: 1 a: '@val-set-null' g: yaml }
       # Indent followed by content: push indent rule.
       { s: '#IN' c: '@val-indent-deeper' p: indent a: '@val-set-in-from-o0' g: yaml }
       # Same indent followed by element marker: list value at map level.
       { s: ['#IN' '#EL'] c: '@val-indent-eq-parent' p: yamlBlockList a: '@val-set-in-from-o0' g: yaml }
       # End of input means empty value.
       { s: '#ZZ' b: 1 a: '@val-set-null' g: yaml }
-      # Document-frame markers indicate an empty document (or end of doc):
-      # back up so the stream rule sees them; treat value as null.
-      { s: '#DS' b: 1 a: '@val-set-null' g: yaml }
-      { s: '#DE' b: 1 a: '@val-set-null' g: yaml }
-      { s: '#DR' b: 1 a: '@val-set-null' g: yaml }
       # Same or lesser indent after a colon means empty value — backtrack.
       { s: '#IN' b: 1 u: { yamlEmpty: true } g: yaml }
       # This value is a list.
@@ -61,11 +61,11 @@ const grammarText = `
   }
   rule: val: close: {
     alts: [
-      { s: '#IN' b: 1 g: yaml }
-      # Document-frame markers terminate val: leave them for the stream rule.
+      # Doc-frame markers terminate val; back up for the stream rule.
       { s: '#DS' b: 1 g: yaml }
       { s: '#DE' b: 1 g: yaml }
       { s: '#DR' b: 1 g: yaml }
+      { s: '#IN' b: 1 g: yaml }
     ]
     inject: { append: false }
   }
@@ -88,6 +88,10 @@ const grammarText = `
     { p: val g: yaml }
   ]
   rule: yamlBlockList: close: [
+    # Doc-frame markers terminate list; back up for the stream rule.
+    { s: '#DS' b: 1 g: yaml }
+    { s: '#DE' b: 1 g: yaml }
+    { s: '#DR' b: 1 g: yaml }
     # Indent followed by element marker: next element at same level.
     { s: ['#IN' '#EL'] c: '@t0-eq-in' r: yamlBlockElem g: yaml }
     # Same or lesser indent: close list.
@@ -103,6 +107,10 @@ const grammarText = `
     { p: val g: yaml }
   ]
   rule: yamlBlockElem: close: [
+    # Doc-frame markers terminate elem; back up for the stream rule.
+    { s: '#DS' b: 1 g: yaml }
+    { s: '#DE' b: 1 g: yaml }
+    { s: '#DR' b: 1 g: yaml }
     { s: ['#IN' '#EL'] c: '@t0-eq-in' r: yamlBlockElem g: yaml }
     { s: '#IN' c: '@t0-le-in' b: 1 g: yaml }
     { s: '#EL' r: yamlBlockElem g: yaml }
@@ -112,6 +120,10 @@ const grammarText = `
   # Amend list rule: close on dedent or same-indent non-element.
   rule: list: close: {
     alts: [
+      # Doc-frame markers terminate list; back up for the stream rule.
+      { s: '#DS' b: 1 g: yaml }
+      { s: '#DE' b: 1 g: yaml }
+      { s: '#DR' b: 1 g: yaml }
       { s: '#IN' c: '@t0-le-in' b: 1 g: yaml }
     ]
     inject: { append: false }
@@ -126,6 +138,10 @@ const grammarText = `
   }
   rule: map: close: {
     alts: [
+      # Doc-frame markers terminate map; back up for the stream rule.
+      { s: '#DS' b: 1 g: yaml }
+      { s: '#DE' b: 1 g: yaml }
+      { s: '#DR' b: 1 g: yaml }
       { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
     ]
     inject: { append: false }
@@ -134,7 +150,7 @@ const grammarText = `
   # Amend pair rule: end of input ends pair; dedent closes, same-indent repeats.
   # Also handle YAML flow-mapping shapes Jsonic doesn't have natively:
   # - implicit null values: {a, b: c}  — KEY followed directly by CA or CB
-  # - explicit-key marker:  {? k : v}  — leading #QM is just consumed
+  # - explicit-key marker:  {? k : v}  — leading #QM is consumed
   rule: pair: open: {
     alts: [
       { s: ['#KEY' '#CA'] a: '@implicit-null-pair' b: 1 g: yaml }
@@ -148,6 +164,10 @@ const grammarText = `
   }
   rule: pair: close: {
     alts: [
+      # Doc-frame markers terminate pair; back up for the stream rule.
+      { s: '#DS' b: 1 g: yaml }
+      { s: '#DE' b: 1 g: yaml }
+      { s: '#DR' b: 1 g: yaml }
       { s: '#IN' c: '@t0-eq-in' r: pair g: yaml }
       { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
     ]
@@ -159,6 +179,10 @@ const grammarText = `
     { s: ['#KEY' '#CL'] p: val a: '@elem-key' g: yaml }
   ]
   rule: yamlElemMap: close: [
+    # Doc-frame markers terminate elem-map; back up for the stream rule.
+    { s: '#DS' b: 1 g: yaml }
+    { s: '#DE' b: 1 g: yaml }
+    { s: '#DR' b: 1 g: yaml }
     { s: '#IN' c: '@t0-eq-map-in' r: yamlElemPair g: yaml }
     { s: '#IN' b: 1 g: yaml }
     { s: '#CA' b: 1 g: yaml }
@@ -172,6 +196,10 @@ const grammarText = `
     { s: ['#KEY' '#CL'] p: val a: '@elem-key' g: yaml }
   ]
   rule: yamlElemPair: close: [
+    # Doc-frame markers terminate elem-pair; back up for the stream rule.
+    { s: '#DS' b: 1 g: yaml }
+    { s: '#DE' b: 1 g: yaml }
+    { s: '#DR' b: 1 g: yaml }
     { s: '#IN' c: '@t0-eq-map-in' r: yamlElemPair g: yaml }
     { s: '#IN' b: 1 g: yaml }
     { s: '#CA' b: 1 g: yaml }
@@ -193,6 +221,10 @@ const grammarText = `
   }
   rule: elem: close: {
     alts: [
+      # Doc-frame markers terminate elem; back up for the stream rule.
+      { s: '#DS' b: 1 g: yaml }
+      { s: '#DE' b: 1 g: yaml }
+      { s: '#DR' b: 1 g: yaml }
       { s: ['#IN' '#EL'] c: '@t0-eq-in' r: elem g: yaml }
       { s: '#IN' c: '@t0-eq-in' b: 1 g: yaml }
       { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
@@ -929,13 +961,19 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
         yaml: {
           order: 5e5,
           make: (_cfg: Config, _opts: Options) => {
-            let cleanedSrc: String | null = null
+            // Track Lex objects we've already initialised. Identity comparison
+            // distinguishes parse invocations correctly even when the same
+            // source string is parsed twice in a row — `lex.src !== cleanedSrc`
+            // would skip the reset on the second call and pollute output with
+            // state from the prior parse.
+            const seenLex: WeakSet<Lex> = new WeakSet()
             return function yamlMatcher(lex: Lex) {
-              // First call (or when source changes): reset per-parse state.
+              // First call of a new parse: reset per-parse state.
               // Document-frame syntax (--- / ... / %YAML / %TAG) is no longer
               // mutated out of lex.src here — it flows through as #DS / #DE /
               // #DR tokens consumed by the `stream` rule.
-              if (lex.src !== cleanedSrc) {
+              if (!seenLex.has(lex)) {
+                seenLex.add(lex)
                 anchors = {}
                 pendingAnchors = []
                 pendingExplicitCL = false
@@ -949,7 +987,6 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
                 _flowScanPos = 0
                 _inSingleQuote = false
                 _inDoubleQuote = false
-                cleanedSrc = lex.src
                 // Empty / whitespace-only / comments-only source: emit one
                 // null #VL so the parser yields `null` rather than an error.
                 let src = '' + lex.src
@@ -2308,21 +2345,6 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
 
   // Configure jsonic to start parsing with `stream` instead of `val`.
   jsonic.options({ rule: { start: 'stream' } })
-
-  // Make every block/flow rule yield to the stream rule when it sees a
-  // doc-frame marker. Rules back up the marker so the stream rule can
-  // accumulate the doc and process the next one.
-  for (const ruleName of ['map', 'list', 'pair', 'elem',
-                          'yamlBlockList', 'yamlBlockElem',
-                          'yamlElemMap', 'yamlElemPair']) {
-    jsonic.rule(ruleName, (rs: RuleSpec) => {
-      rs.close([
-        { s: '#DS', b: 1, g: 'yaml' },
-        { s: '#DE', b: 1, g: 'yaml' },
-        { s: '#DR', b: 1, g: 'yaml' },
-      ])
-    })
-  }
 
   // map rule: default indent and merge-key handling.
   jsonic.rule('map', (rulespec: RuleSpec) => {
