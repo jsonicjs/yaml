@@ -427,6 +427,151 @@ func TestDocumentEndMarker(t *testing.T) {
 	expectEqual(t, y(t, "a: 1\n..."), map[string]any{"a": float64(1)})
 }
 
+func TestTwoDocuments(t *testing.T) {
+	expectEqual(t, y(t, "---\na: 1\n---\nb: 2"),
+		[]any{map[string]any{"a": float64(1)}, map[string]any{"b": float64(2)}})
+}
+
+func TestThreeDocuments(t *testing.T) {
+	expectEqual(t, y(t, "---\na: 1\n---\nb: 2\n---\nc: 3"),
+		[]any{
+			map[string]any{"a": float64(1)},
+			map[string]any{"b": float64(2)},
+			map[string]any{"c": float64(3)},
+		})
+}
+
+func TestTwoDocumentsWithEndMarkers(t *testing.T) {
+	expectEqual(t, y(t, "---\na: 1\n...\n---\nb: 2"),
+		[]any{map[string]any{"a": float64(1)}, map[string]any{"b": float64(2)}})
+}
+
+func TestMultiDocMixedShapes(t *testing.T) {
+	expectEqual(t, y(t, "---\n- 1\n- 2\n---\na: 1\n---\nfoo"),
+		[]any{
+			[]any{float64(1), float64(2)},
+			map[string]any{"a": float64(1)},
+			"foo",
+		})
+}
+
+func TestMultiDocEmptyDocs(t *testing.T) {
+	expectEqual(t, y(t, "---\n---\n---"), []any{nil, nil, nil})
+}
+
+func TestMultiDocListOfLists(t *testing.T) {
+	expectEqual(t, y(t, "---\n- a\n- b\n---\n- c\n- d"),
+		[]any{[]any{"a", "b"}, []any{"c", "d"}})
+}
+
+func TestMultiDocWithYamlDirective(t *testing.T) {
+	expectEqual(t, y(t, "%YAML 1.2\n---\na: 1"), map[string]any{"a": float64(1)})
+}
+
+func TestMultiDocWithTagDirective(t *testing.T) {
+	expectEqual(t, y(t, "%TAG !! tag:example.com,2025:\n---\na: 1"),
+		map[string]any{"a": float64(1)})
+}
+
+// ===== STREAM META OPTION =====
+
+func ymeta(t *testing.T, src string) *MetaResult {
+	t.Helper()
+	j := MakeJsonic(YamlOptions{Meta: true})
+	r, err := j.Parse(src)
+	if err != nil {
+		t.Fatalf("Parse error: %v\nInput: %q", err, src)
+	}
+	mr, ok := r.(*MetaResult)
+	if !ok {
+		t.Fatalf("expected *MetaResult, got %T", r)
+	}
+	return mr
+}
+
+func TestMetaSingleDocImplicit(t *testing.T) {
+	r := ymeta(t, "a: 1")
+	expectEqual(t, r.Content, map[string]any{"a": float64(1)})
+	m, ok := r.Meta.(*DocMeta)
+	if !ok {
+		t.Fatalf("expected *DocMeta, got %T", r.Meta)
+	}
+	if m.Explicit != false || m.Ended != false || len(m.Directives) != 0 {
+		t.Errorf("unexpected meta: %+v", m)
+	}
+}
+
+func TestMetaSingleDocExplicitStart(t *testing.T) {
+	r := ymeta(t, "---\na: 1")
+	m := r.Meta.(*DocMeta)
+	if !m.Explicit {
+		t.Errorf("expected Explicit=true, got %+v", m)
+	}
+}
+
+func TestMetaSingleDocExplicitEnd(t *testing.T) {
+	r := ymeta(t, "a: 1\n...")
+	m := r.Meta.(*DocMeta)
+	if !m.Ended {
+		t.Errorf("expected Ended=true, got %+v", m)
+	}
+}
+
+func TestMetaTwoDocsArray(t *testing.T) {
+	r := ymeta(t, "---\na: 1\n---\nb: 2")
+	expectEqual(t, r.Content, []any{
+		map[string]any{"a": float64(1)},
+		map[string]any{"b": float64(2)},
+	})
+	metas, ok := r.Meta.([]*DocMeta)
+	if !ok {
+		t.Fatalf("expected []*DocMeta, got %T", r.Meta)
+	}
+	if len(metas) != 2 || !metas[0].Explicit || !metas[1].Explicit {
+		t.Errorf("unexpected metas: %+v", metas)
+	}
+}
+
+func TestMetaTwoDocsEndFlagOnlyOnFirst(t *testing.T) {
+	r := ymeta(t, "---\na: 1\n...\n---\nb: 2")
+	metas := r.Meta.([]*DocMeta)
+	if !metas[0].Ended {
+		t.Errorf("expected metas[0].Ended=true, got %+v", metas[0])
+	}
+	if metas[1].Ended {
+		t.Errorf("expected metas[1].Ended=false, got %+v", metas[1])
+	}
+}
+
+func TestMetaDirectiveCaptured(t *testing.T) {
+	r := ymeta(t, "%YAML 1.2\n---\na: 1")
+	m := r.Meta.(*DocMeta)
+	if len(m.Directives) != 1 || m.Directives[0] != "%YAML 1.2" {
+		t.Errorf("unexpected directives: %+v", m.Directives)
+	}
+	if !m.Explicit {
+		t.Errorf("expected Explicit=true")
+	}
+}
+
+func TestMetaPerDocDirectivesIsolated(t *testing.T) {
+	r := ymeta(t, "%YAML 1.2\n---\na: 1\n---\nb: 2")
+	metas := r.Meta.([]*DocMeta)
+	if len(metas[0].Directives) != 1 || metas[0].Directives[0] != "%YAML 1.2" {
+		t.Errorf("metas[0].Directives = %+v", metas[0].Directives)
+	}
+	if len(metas[1].Directives) != 0 {
+		t.Errorf("metas[1].Directives = %+v (want empty)", metas[1].Directives)
+	}
+}
+
+func TestMetaDisabledReturnsBareContent(t *testing.T) {
+	// Default Meta:false: same shape as no plugin option.
+	expectEqual(t, y(t, "a: 1"), map[string]any{"a": float64(1)})
+	expectEqual(t, y(t, "---\na: 1\n---\nb: 2"),
+		[]any{map[string]any{"a": float64(1)}, map[string]any{"b": float64(2)}})
+}
+
 // ===== TAGS =====
 
 func TestExplicitStringTag(t *testing.T) {

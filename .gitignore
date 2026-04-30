@@ -64,3 +64,5 @@ bench/**/*.cpuprofile
 bench/**/*.cpuprof
 bench/**/*.memprof
 bench/**/*.json
+# Claude Code per-machine settings
+.claude*/settings.local.json

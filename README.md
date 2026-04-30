@@ -1,7 +1,6 @@
 # @jsonic/yaml
 
-A [Jsonic](https://jsonic.senecajs.org) plugin that parses a core
-subset of YAML into plain JavaScript objects or Go values, using
+A [Jsonic](https://jsonic.senecajs.org) plugin that parses YAML into plain JavaScript objects or Go values, using
 Jsonic's extensible grammar engine.
 
 Available for both **TypeScript/JavaScript** (npm) and **Go**.

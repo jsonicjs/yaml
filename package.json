@@ -1,6 +1,6 @@
 {
   "name": "@jsonic/yaml",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "This plugin allows the [Jsonic](https://jsonic.senecajs.org) JSON parser to support a core subset of YAML syntax.",
   "main": "dist/yaml.js",
   "type": "commonjs",
@@ -21,8 +21,8 @@
     "test": "node --enable-source-maps --test \"dist-test/*.test.js\"",
     "test-some": "node --enable-source-maps --test-name-pattern=\"$npm_config_pattern\" --test \"dist-test/*.test.js\"",
     "watch": "tsc --build src test -w",
-    "build": "tsc --build src test",
     "embed": "node embed-grammar.js",
+    "build": "node embed-grammar.js && tsc --build src test",
     "clean": "rm -rf dist dist-test node_modules yarn.lock package-lock.json",
     "reset": "npm run clean && npm i && npm run build && npm test",
     "repo-tag": "REPO_VERSION=`node -e \"console.log(require('./package').version)\"` && echo TAG: v$REPO_VERSION && git commit -a -m v$REPO_VERSION && git push && git tag v$REPO_VERSION && git push --tags;",
@@ -36,8 +36,8 @@
     "LICENSE"
   ],
   "devDependencies": {
-    "@types/node": "^25.6.0",
-    "typescript": "^5.9.3"
+    "@types/node": "25.6.0",
+    "typescript": "6.0.3"
   },
   "peerDependencies": {
     "jsonic": ">=2"

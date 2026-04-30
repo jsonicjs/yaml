@@ -490,18 +490,136 @@ c:
   describe('multi-document', () => {
 
     test('document-start-marker', () => {
+      // Single doc with explicit start: still scalar (one doc).
       assert.deepEqual(y(`---\na: 1`), { a: 1 })
     })
 
     test('document-end-marker', () => {
+      // Single doc terminated with `...`: still scalar (one doc).
       assert.deepEqual(y(`a: 1\n...`), { a: 1 })
     })
 
-    test('multiple-documents', () => {
-      // Parser may only return first document or throw
-      let result: any
-      try { result = y(`---\na: 1\n---\nb: 2`) } catch (e: any) { result = 'ERROR' }
-      assert.ok(result != null)
+    test('two-documents', () => {
+      // Two docs: array of values.
+      assert.deepEqual(y(`---\na: 1\n---\nb: 2`),
+        [{ a: 1 }, { b: 2 }])
+    })
+
+    test('three-documents', () => {
+      assert.deepEqual(y(`---\na: 1\n---\nb: 2\n---\nc: 3`),
+        [{ a: 1 }, { b: 2 }, { c: 3 }])
+    })
+
+    test('two-documents-with-end-markers', () => {
+      // `...` between docs is allowed.
+      assert.deepEqual(y(`---\na: 1\n...\n---\nb: 2`),
+        [{ a: 1 }, { b: 2 }])
+    })
+
+    test('multi-doc-mixed-shapes', () => {
+      // Each doc has independent shape: list, then map, then scalar.
+      assert.deepEqual(y(`---\n- 1\n- 2\n---\na: 1\n---\nfoo`),
+        [[1, 2], { a: 1 }, 'foo'])
+    })
+
+    test('multi-doc-empty-docs', () => {
+      // Bare `---` between docs counts as an empty (null) doc.
+      assert.deepEqual(y(`---\n---\n---`), [null, null, null])
+    })
+
+    test('multi-doc-list-of-lists', () => {
+      assert.deepEqual(y(`---\n- a\n- b\n---\n- c\n- d`),
+        [['a', 'b'], ['c', 'd']])
+    })
+
+    test('multi-doc-with-yaml-directive', () => {
+      // %YAML directive is silently accepted; doesn't change result shape.
+      assert.deepEqual(y(`%YAML 1.2\n---\na: 1`), { a: 1 })
+    })
+
+    test('multi-doc-with-tag-directive', () => {
+      // %TAG handle registered; result is just the doc value.
+      assert.deepEqual(y(`%TAG !! tag:example.com,2025:\n---\na: 1`),
+        { a: 1 })
+    })
+  })
+
+
+  // ===== STREAM META OPTION =====
+
+  describe('stream-meta', () => {
+
+    function ym(src: string) {
+      const j = Jsonic.make().use(Yaml, { meta: true })
+      return j(src)
+    }
+
+    test('single-doc-implicit-meta-shape', () => {
+      // No markers, single doc: meta is a single object, content is the value.
+      const r = ym(`a: 1`)
+      assert.deepEqual(r.content, { a: 1 })
+      assert.deepEqual(r.meta, { directives: [], explicit: false, ended: false })
+    })
+
+    test('single-doc-explicit-start-marked', () => {
+      const r = ym(`---\na: 1`)
+      assert.deepEqual(r.content, { a: 1 })
+      assert.deepEqual(r.meta.explicit, true)
+      assert.deepEqual(r.meta.ended, false)
+    })
+
+    test('single-doc-explicit-end-marked', () => {
+      const r = ym(`a: 1\n...`)
+      assert.deepEqual(r.content, { a: 1 })
+      assert.deepEqual(r.meta.ended, true)
+    })
+
+    test('two-docs-meta-is-array', () => {
+      const r = ym(`---\na: 1\n---\nb: 2`)
+      assert.deepEqual(r.content, [{ a: 1 }, { b: 2 }])
+      assert.ok(Array.isArray(r.meta))
+      assert.deepEqual(r.meta.length, 2)
+      assert.deepEqual(r.meta[0].explicit, true)
+      assert.deepEqual(r.meta[1].explicit, true)
+    })
+
+    test('two-docs-end-flag-only-on-first', () => {
+      // Only the first doc is `...`-terminated; second isn't.
+      const r = ym(`---\na: 1\n...\n---\nb: 2`)
+      assert.deepEqual(r.meta[0].ended, true)
+      assert.deepEqual(r.meta[1].ended, false)
+    })
+
+    test('directive-captured-in-meta', () => {
+      const r = ym(`%YAML 1.2\n---\na: 1`)
+      assert.deepEqual(r.meta.directives, ['%YAML 1.2'])
+      assert.deepEqual(r.meta.explicit, true)
+    })
+
+    test('multiple-directives-captured', () => {
+      const r = ym(`%YAML 1.2\n%TAG !! tag:foo.com,2025:\n---\na: 1`)
+      assert.deepEqual(r.meta.directives,
+        ['%YAML 1.2', '%TAG !! tag:foo.com,2025:'])
+    })
+
+    test('per-doc-directives-isolated', () => {
+      // Directives apply only to the doc that follows them.
+      const r = ym(`%YAML 1.2\n---\na: 1\n---\nb: 2`)
+      assert.deepEqual(r.meta[0].directives, ['%YAML 1.2'])
+      assert.deepEqual(r.meta[1].directives, [])
+    })
+
+    test('meta-disabled-returns-bare-content', () => {
+      // Default meta=false: same shape as no plugin option.
+      const j = Jsonic.make().use(Yaml)
+      assert.deepEqual(j(`a: 1`), { a: 1 })
+      assert.deepEqual(j(`---\na: 1\n---\nb: 2`), [{ a: 1 }, { b: 2 }])
+    })
+
+    test('meta-explicitly-disabled', () => {
+      // meta:false matches meta-not-passed.
+      const j = Jsonic.make().use(Yaml, { meta: false })
+      assert.deepEqual(j(`a: 1`), { a: 1 })
     })
   })
 
@@ -776,6 +894,148 @@ c:
           database: { host: 'localhost', port: 5432, name: 'mydb' },
           cache: { enabled: true, ttl: 3600 }
         })
+    })
+  })
+
+
+  // ===== PERFORMANCE =====
+  // Each test parses a representative workload many times and asserts the
+  // total stays under a 2-second budget. Iteration counts are sized so the
+  // expected cost on a typical dev box is ~1s, leaving ~50% headroom for
+  // slower CI runners.
+
+  describe('performance', () => {
+    const BUDGET_MS = 2000
+
+    function measure(iters: number, src: string) {
+      const j = Jsonic.make().use(Yaml)
+      // Warm up so JIT/cache effects don't show up in the measured loop.
+      for (let i = 0; i < 50; i++) j(src)
+      const t0 = Date.now()
+      for (let i = 0; i < iters; i++) j(src)
+      return Date.now() - t0
+    }
+
+    test('tiny block map under 2s', () => {
+      const elapsed = measure(2500, `a: 1\nb: 2\nc: 3`)
+      assert.ok(elapsed < BUDGET_MS,
+        `tiny-block-map 2500x took ${elapsed}ms (budget ${BUDGET_MS}ms)`)
+    })
+
+    test('nested block map under 2s', () => {
+      const src = `
+top:
+  a: 1
+  b:
+    c: 2
+    d: 3
+  e:
+    - 1
+    - 2
+    - 3
+  f:
+    g:
+      h: 4
+`
+      const elapsed = measure(1000, src)
+      assert.ok(elapsed < BUDGET_MS,
+        `nested-block-map 1000x took ${elapsed}ms (budget ${BUDGET_MS}ms)`)
+    })
+
+    test('flow seq 200 items under 2s', () => {
+      const items = []
+      for (let i = 0; i < 200; i++) items.push(`v${i}`)
+      const src = '[' + items.join(', ') + ']'
+      const elapsed = measure(100, src)
+      assert.ok(elapsed < BUDGET_MS,
+        `flow-seq-200 100x took ${elapsed}ms (budget ${BUDGET_MS}ms)`)
+    })
+
+    test('flow map 200 pairs under 2s', () => {
+      const pairs = []
+      for (let i = 0; i < 200; i++) pairs.push(`k${i}: v${i}`)
+      const src = '{' + pairs.join(', ') + '}'
+      const elapsed = measure(50, src)
+      assert.ok(elapsed < BUDGET_MS,
+        `flow-map-200 50x took ${elapsed}ms (budget ${BUDGET_MS}ms)`)
+    })
+
+    test('block seq 200 items under 2s', () => {
+      const items = []
+      for (let i = 0; i < 200; i++) items.push(`- item${i}`)
+      const src = items.join('\n')
+      const elapsed = measure(100, src)
+      assert.ok(elapsed < BUDGET_MS,
+        `block-seq-200 100x took ${elapsed}ms (budget ${BUDGET_MS}ms)`)
+    })
+
+    test('anchors and aliases under 2s', () => {
+      const src = `
+defaults: &d
+  retries: 3
+  timeout: 30
+prod:
+  <<: *d
+  host: prod.com
+dev:
+  <<: *d
+  host: dev.com
+`
+      const elapsed = measure(750, src)
+      assert.ok(elapsed < BUDGET_MS,
+        `anchors+aliases 750x took ${elapsed}ms (budget ${BUDGET_MS}ms)`)
+    })
+
+    test('kubernetes-like config under 2s', () => {
+      const src = `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  labels:
+    app: nginx
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.14.2
+        ports:
+        - containerPort: 80
+`
+      const elapsed = measure(500, src)
+      assert.ok(elapsed < BUDGET_MS,
+        `kubernetes-like 500x took ${elapsed}ms (budget ${BUDGET_MS}ms)`)
+    })
+
+    test('multi-document stream under 2s', () => {
+      // 50-document stream — exercises the new stream rule's accumulation.
+      const docs = []
+      for (let i = 0; i < 50; i++) docs.push(`doc: ${i}`)
+      const src = '---\n' + docs.join('\n---\n')
+      const elapsed = measure(250, src)
+      assert.ok(elapsed < BUDGET_MS,
+        `multi-doc-50 250x took ${elapsed}ms (budget ${BUDGET_MS}ms)`)
+    })
+
+    test('quoted strings under 2s', () => {
+      const src = `
+s1: "hello \\"world\\""
+s2: 'it''s working'
+s3: "multi
+line"
+s4: "tab\\there"
+`
+      const elapsed = measure(1250, src)
+      assert.ok(elapsed < BUDGET_MS,
+        `quoted-strings 1250x took ${elapsed}ms (budget ${BUDGET_MS}ms)`)
     })
   })
 
