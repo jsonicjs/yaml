@@ -2,7 +2,7 @@
 
 all: build test
 
-build: embed build-ts build-go
+build: build-ts build-go
 
 test: test-ts test-go
 
@@ -23,7 +23,7 @@ clean-ts:
 	rm -rf dist dist-test
 
 # Go
-build-go:
+build-go: embed
 	cd go && go build ./...
 
 test-go:
