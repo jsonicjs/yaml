@@ -20,6 +20,11 @@ off-boolean	a: off	{"a":false}
 digit-start-plain-scalar	description: 64 characters, hexadecimal.	{"description":"64 characters, hexadecimal."}
 digit-start-with-text	a: 42 things	{"a":"42 things"}
 digit-start-ordinal	a: 1st place	{"a":"1st place"}
+digit-start-comma-pair	point: 1, 2	{"point":"1, 2"}
+digit-start-comma-pair-tight	point: 1,2	{"point":"1,2"}
+digit-start-comma-triple	rgb: 10, 20, 30	{"rgb":"10, 20, 30"}
+digit-start-comma-floats	xy: 1.5, 2.5	{"xy":"1.5, 2.5"}
+digit-start-comma-seq-elem	- 1, 2	["1, 2"]
 double-quoted	a: "hello"	{"a":"hello"}
 single-quoted	a: 'hello'	{"a":"hello"}
 double-quoted-with-colon	a: "key: value"	{"a":"key: value"}

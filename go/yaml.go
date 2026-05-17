@@ -2388,9 +2388,12 @@ func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsoni
 			hasEmbeddedColon = true
 			break
 		}
-		// Trailing comma at end of line means plain scalar in block context
-		// (e.g. "12,"). In flow context commas are separators followed by
-		// more values on the same line.
+		// In block context, commas are scalar characters, not separators —
+		// "12," or "1, 2" or "1,2,3" are plain scalars. Trailing comma at
+		// end of line uses the local TX path; embedded commas route through
+		// TextCheck so spaces and multi-line continuation are handled.
+		// Flow-context commas are real separators; defer to the existing
+		// flow-depth check at the output site.
 		if fwd[pi] == ',' {
 			ci := pi + 1
 			for ci < len(fwd) && (fwd[ci] == ' ' || fwd[ci] == '\t') {
@@ -2398,6 +2401,8 @@ func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsoni
 			}
 			if ci >= len(fwd) || fwd[ci] == '\n' || fwd[ci] == '\r' {
 				hasTrailingComma = true
+			} else {
+				hasTrailingText = true
 			}
 			break
 		}
