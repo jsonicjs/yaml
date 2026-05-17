@@ -1832,14 +1832,21 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
                     hasEmbeddedColon = true
                     break
                   }
-                  // Trailing comma at end of line means plain scalar in block
-                  // context (e.g. "12,"). In flow context commas are always
-                  // separators, so don't treat the digits as a plain scalar.
+                  // In block context, commas are scalar characters, not
+                  // separators — "12," or "1, 2" or "1,2,3" are plain scalars.
+                  // Trailing comma at end of line takes the local TX path;
+                  // embedded commas route through text.check so spaces and
+                  // multi-line continuation are handled.
+                  // In flow context commas are always separators.
                   if (fwd[pi] === ',') {
-                    let ci = pi + 1
-                    while (ci < fwd.length && (fwd[ci] === ' ' || fwd[ci] === '\t')) ci++
-                    if (!inFlow && (ci >= fwd.length || fwd[ci] === '\n' || fwd[ci] === '\r')) {
-                      hasTrailingComma = true
+                    if (!inFlow) {
+                      let ci = pi + 1
+                      while (ci < fwd.length && (fwd[ci] === ' ' || fwd[ci] === '\t')) ci++
+                      if (ci >= fwd.length || fwd[ci] === '\n' || fwd[ci] === '\r') {
+                        hasTrailingComma = true
+                      } else {
+                        hasTrailingText = true
+                      }
                     }
                     break
                   }

@@ -183,6 +183,18 @@ c:
       assert.deepEqual(y(`a: hello, world!`), { a: 'hello, world!' })
     })
 
+    test('digit-start-comma-pair', () => {
+      // Unquoted comma-separated numbers in block context are plain scalars.
+      assert.deepEqual(y(`point: 1, 2`), { point: '1, 2' })
+      assert.deepEqual(y(`point: 1,2`), { point: '1,2' })
+      assert.deepEqual(y(`rgb: 10, 20, 30`), { rgb: '10, 20, 30' })
+      assert.deepEqual(y(`xy: 1.5, 2.5`), { xy: '1.5, 2.5' })
+      assert.deepEqual(y(`- 1, 2`), ['1, 2'])
+      assert.deepEqual(y(`- 1, 2\n- 3, 4`), ['1, 2', '3, 4'])
+      // Flow context still treats commas as separators.
+      assert.deepEqual(y(`a: [1, 2]`), { a: [1, 2] })
+    })
+
     test('plain-string-with-double-curly-braces', () => {
       assert.deepEqual(y(`foo: a{{q}}b`), { foo: 'a{{q}}b' })
     })
